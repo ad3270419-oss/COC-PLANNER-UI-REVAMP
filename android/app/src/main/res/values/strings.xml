@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Clash Planner</string>
+    <string name="title_activity_main">Clash Planner</string>
+    <string name="package_name">com.cocpotion.calculator</string>
+    <string name="custom_url_scheme">com.cocpotion.calculator</string>
+</resources>

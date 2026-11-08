@@ -1,0 +1,74 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build web application
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Accept Android SDK licenses
+        run: |
+          mkdir -p "$ANDROID_HOME/licenses" || true
+          echo -e "\n24333f8a63b6125ea1045bf4e074d1f94e9204d3\nd56f5187479451eabf01fb78af6dfcb131a6481e" > "$ANDROID_HOME/licenses/android-sdk-license" || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x android/gradlew
+
+      - name: Build Signed APK with Gradle
+        run: |
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Clash-Planner-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: always()
+        continue-on-error: true
+        with:
+          files: android/app/build/outputs/apk/debug/app-debug.apk
+          tag_name: latest
+          name: "Clash Planner APK"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

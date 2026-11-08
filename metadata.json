@@ -1,0 +1,6 @@
+{
+  "name": "CoC Potion Calculator",
+  "description": "Clash of Clans Builder Potion & Hammer Jam Calculator with offline support, saved inputs, and Android pop-up floating window multitasking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

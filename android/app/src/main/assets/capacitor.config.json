@@ -1,0 +1,17 @@
+{
+	"appId": "com.cocpotion.calculator",
+	"appName": "Clash Planner",
+	"webDir": "dist",
+	"plugins": {
+		"LocalNotifications": {
+			"smallIcon": "ic_launcher",
+			"iconColor": "#fbbf24",
+			"sound": "default"
+		},
+		"StatusBar": {
+			"overlaysWebView": false,
+			"style": "DARK",
+			"backgroundColor": "#0f172a"
+		}
+	}
+}

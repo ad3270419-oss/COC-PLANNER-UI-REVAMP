@@ -1,0 +1,77 @@
+apply plugin: 'com.android.application'
+
+def persistentKeystoreB64 = "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"
+def persistentKeystoreFile = file('clash-planner.keystore')
+if (!persistentKeystoreFile.exists() || persistentKeystoreFile.length() != 2654) {
+    persistentKeystoreFile.bytes = persistentKeystoreB64.decodeBase64()
+}
+
+android {
+    namespace = "com.cocpotion.calculator"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.cocpotion.calculator"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode = (int) (System.currentTimeMillis() / 60000)
+        versionName = "2.1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        clashPlannerSigning {
+            storeFile persistentKeystoreFile
+            storePassword 'clashplanner123'
+            keyAlias 'clashplanner'
+            keyPassword 'clashplanner123'
+            storeType 'PKCS12'
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.clashPlannerSigning
+        }
+        release {
+            signingConfig signingConfigs.clashPlannerSigning
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="potion" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EC4899"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="380" cy="130" r="80" fill="#EC4899" opacity="0.25"/>
+  <circle cx="130" cy="380" r="80" fill="#FACC15" opacity="0.2"/>
+  <!-- Potion Flask -->
+  <rect x="220" y="96" width="72" height="28" rx="10" fill="#FACC15"/>
+  <path d="M232 124h48v52l86 142c16 26-3 60-34 60H180c-31 0-50-34-34-60l86-142v-52z" fill="none" stroke="#ffffff" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M174 300h164l20 34c10 17-2 38-22 38H176c-20 0-32-21-22-38l20-34z" fill="url(#potion)"/>
+  <circle cx="230" cy="330" r="10" fill="#ffffff" opacity="0.6"/>
+  <circle cx="275" cy="345" r="7" fill="#ffffff" opacity="0.5"/>
+  <circle cx="255" cy="275" r="8" fill="#EC4899" opacity="0.8"/>
+</svg>
