@@ -369,7 +369,7 @@ function getScopedVillageHistoryStorageKey(
 ): string {
   const cleanedTag = playerTag?.trim().toUpperCase();
   return cleanedTag
-    ? `village_history_${cleanedTag}_${yearMonthKey}`
+    ? `village_history_${yearMonthKey}_${cleanedTag}`
     : getVillageHistoryStorageKey(yearMonthKey);
 }
 
@@ -379,8 +379,28 @@ function getVillageBaselineStorageKey(
 ): string {
   const cleanedTag = playerTag?.trim().toUpperCase();
   return cleanedTag
-    ? `village_baseline_${cleanedTag}_${yearMonthKey}`
+    ? `village_baseline_${yearMonthKey}_${cleanedTag}`
     : `village_baseline_${yearMonthKey}`;
+}
+
+function hasVillageBaselineInStorage(
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): boolean {
+  try {
+    const baselineKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+    const raw = localStorage.getItem(baselineKey);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    return (
+      Boolean(parsed) &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Object.keys(parsed as Record<string, unknown>).length > 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 function normalizeVillageMonthlyHistory(raw: unknown): VillageMonthlyHistory {
@@ -428,7 +448,7 @@ function normalizeVillageMonthlyHistory(raw: unknown): VillageMonthlyHistory {
       typeof rec.currentLevel === 'number' && Number.isFinite(rec.currentLevel)
         ? Math.floor(rec.currentLevel)
         : 0;
-    if (startLevel >= 0 && currentLevel > 0) {
+    if (startLevel > 0 && currentLevel > startLevel) {
       upgrades[id] = {
         name:
           typeof rec.name === 'string' && rec.name.trim()
@@ -460,7 +480,7 @@ function saveVillageMonthlyHistory(
     upgrades: history.upgrades,
   });
   try {
-    // Always write to the canonical village_history_YYYY_MM key for the active village
+    // Write to both the scoped key village_history_${YYYY_MM}_${PLAYER_TAG} and canonical village_history_${YYYY_MM}
     localStorage.setItem(getVillageHistoryStorageKey(yearMonthKey), payload);
     if (playerTag && playerTag.trim()) {
       localStorage.setItem(
@@ -480,9 +500,13 @@ function loadVillageMonthlyHistory(
   let history = createEmptyVillageMonthlyHistory();
   try {
     const scopedKey = getScopedVillageHistoryStorageKey(playerTag, yearMonthKey);
+    const legacyScopedKey = playerTag?.trim()
+      ? `village_history_${playerTag.trim().toUpperCase()}_${yearMonthKey}`
+      : null;
     const defaultKey = getVillageHistoryStorageKey(yearMonthKey);
     const raw =
       (playerTag?.trim() ? localStorage.getItem(scopedKey) : null) ||
+      (legacyScopedKey ? localStorage.getItem(legacyScopedKey) : null) ||
       localStorage.getItem(defaultKey);
     if (raw) {
       history = normalizeVillageMonthlyHistory(JSON.parse(raw));
@@ -491,7 +515,15 @@ function loadVillageMonthlyHistory(
     // Ignore parse errors
   }
 
-  // Merge any existing legacy clash_stats_* counts so nothing is ever lost
+  // If no baseline snapshot exists yet for this village & month, upgrades must remain empty
+  if (!hasVillageBaselineInStorage(playerTag, yearMonthKey)) {
+    history = {
+      ...history,
+      upgrades: {},
+    };
+  }
+
+  // Merge any existing legacy clash_stats_* potion counts so manual potion usage is always preserved
   if (playerTag?.trim()) {
     const legacy = loadMonthlyStatsForTag(playerTag, yearMonthKey);
     const mergedBuilderUsed = Math.max(history.potions.builder.used, legacy.builderPotionsCount);
@@ -529,25 +561,22 @@ function loadVillageMonthlyHistory(
 function loadVillageBaselineLevels(
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
-): Record<string, number> {
+): Record<string, number> | null {
   try {
-    const scopedKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
-    const defaultKey = getVillageBaselineStorageKey(null, yearMonthKey);
-    const raw =
-      (playerTag?.trim() ? localStorage.getItem(scopedKey) : null) ||
-      localStorage.getItem(defaultKey);
-    if (!raw) return {};
+    const baselineKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+    const raw = localStorage.getItem(baselineKey);
+    if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     const result: Record<string, number> = {};
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
         result[k] = Math.floor(v);
       }
     }
-    return result;
+    return Object.keys(result).length > 0 ? result : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -558,13 +587,122 @@ function saveVillageBaselineLevels(
 ): void {
   const payload = JSON.stringify(baseline);
   try {
-    localStorage.setItem(getVillageBaselineStorageKey(null, yearMonthKey), payload);
+    const baselineKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+    localStorage.setItem(baselineKey, payload);
     if (playerTag?.trim()) {
-      localStorage.setItem(getVillageBaselineStorageKey(playerTag, yearMonthKey), payload);
+      localStorage.setItem(getVillageBaselineStorageKey(null, yearMonthKey), payload);
     }
   } catch {
     // Ignore storage quota errors
   }
+}
+
+/**
+ * Extracts a snapshot map `{ [dataId]: currentLevel }` for all Buildings, Traps,
+ * Heroes, Pets, Spells, Units, Siege Machines, and Helpers in the imported village JSON.
+ */
+function extractVillageLevelsFromJson(parsedData: RawCoCVillage): Record<string, number> {
+  const allItems: RawCoCItem[] = [
+    ...(Array.isArray(parsedData.buildings) ? parsedData.buildings : []),
+    ...(Array.isArray(parsedData.traps) ? parsedData.traps : []),
+    ...(Array.isArray(parsedData.heroes) ? parsedData.heroes : []),
+    ...(Array.isArray(parsedData.pets) ? parsedData.pets : []),
+    ...(Array.isArray(parsedData.spells) ? parsedData.spells : []),
+    ...(Array.isArray(parsedData.units) ? parsedData.units : []),
+    ...(Array.isArray(parsedData.siege_machines) ? parsedData.siege_machines : []),
+    ...(Array.isArray(parsedData.helpers) ? parsedData.helpers : []),
+  ];
+
+  const snapshotLevels: Record<string, number> = {};
+  for (const rawItem of allItems) {
+    if (!rawItem) continue;
+    const itemId = String(rawItem.data ?? rawItem.id ?? '').trim();
+    const itemLvl =
+      typeof rawItem.lvl === 'number' && Number.isFinite(rawItem.lvl)
+        ? Math.floor(rawItem.lvl)
+        : 0;
+    if (!itemId || itemLvl <= 0) continue;
+    if (snapshotLevels[itemId] === undefined || itemLvl > snapshotLevels[itemId]) {
+      snapshotLevels[itemId] = itemLvl;
+    }
+  }
+  return snapshotLevels;
+}
+
+/**
+ * Handles the Monthly Baseline & History comparison on JSON import:
+ * 1. Checks if `village_baseline_${YYYY_MM}_${PLAYER_TAG}` exists in localStorage.
+ * 2. IF IT DOES NOT EXIST (First import of the month):
+ *    - Saves all current JSON levels directly into `village_baseline_${YYYY_MM}_${PLAYER_TAG}`.
+ *    - Does NOT register any items as completed upgrades in `village_history` (`upgrades: {}`).
+ * 3. IF THE BASELINE ALREADY EXISTS (Subsequent imports):
+ *    - Compares newly imported JSON levels against the stored `village_baseline_${YYYY_MM}_${PLAYER_TAG}`.
+ *    - Logs an item into `village_history_${YYYY_MM}_${PLAYER_TAG}` ONLY if `newLevel > baselineLevel`.
+ */
+function syncMonthlyBaselineAndHistoryOnImport(
+  parsedData: RawCoCVillage,
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): VillageMonthlyHistory {
+  const importedLevels = extractVillageLevelsFromJson(parsedData);
+  const existingBaseline = loadVillageBaselineLevels(playerTag, yearMonthKey);
+  const currentHistory = loadVillageMonthlyHistory(playerTag, yearMonthKey);
+
+  // 1. FIRST IMPORT OF THE MONTH (NO BASELINE EXISTS YET)
+  if (!existingBaseline) {
+    saveVillageBaselineLevels(importedLevels, playerTag, yearMonthKey);
+    const initialHistory: VillageMonthlyHistory = {
+      potions: {
+        builder: { ...currentHistory.potions.builder },
+        research: { ...currentHistory.potions.research },
+        pet: { ...currentHistory.potions.pet },
+      },
+      upgrades: {}, // Strictly empty on first baseline snapshot import
+    };
+    saveVillageMonthlyHistory(initialHistory, playerTag, yearMonthKey);
+    return initialHistory;
+  }
+
+  // 2. SUBSEQUENT IMPORTS (BASELINE ALREADY EXISTS)
+  const nextUpgrades: Record<string, VillageHistoryUpgradeEntry> = {
+    ...currentHistory.upgrades,
+  };
+  let baselineUpdatedWithNewUnlocks = false;
+
+  for (const [itemId, newLevel] of Object.entries(importedLevels)) {
+    const baselineLevel = existingBaseline[itemId];
+
+    if (typeof baselineLevel === 'number') {
+      // Strictly greater than the baseline level -> log completed upgrade in village_history
+      if (newLevel > baselineLevel) {
+        nextUpgrades[itemId] = {
+          name: resolveUpgradeName(itemId, `Item ${itemId}`),
+          startLevel: baselineLevel,
+          currentLevel: newLevel,
+        };
+      }
+    } else {
+      // Newly unlocked/built item not present in initial snapshot -> add to baseline without false upgrade
+      existingBaseline[itemId] = newLevel;
+      baselineUpdatedWithNewUnlocks = true;
+    }
+  }
+
+  if (baselineUpdatedWithNewUnlocks) {
+    saveVillageBaselineLevels(existingBaseline, playerTag, yearMonthKey);
+  }
+
+  const updatedHistory: VillageMonthlyHistory = {
+    potions: {
+      builder: { ...currentHistory.potions.builder },
+      research: { ...currentHistory.potions.research },
+      pet: { ...currentHistory.potions.pet },
+    },
+    upgrades: nextUpgrades,
+  };
+
+  saveVillageMonthlyHistory(updatedHistory, playerTag, yearMonthKey);
+  return updatedHistory;
 }
 
 function getMonthlySectionStorageKey(
@@ -6520,224 +6658,19 @@ export default function App() {
       });
     }
 
-    // Automatically reverse-calculate & credit active potion boosts from imported JSON into monthly stats
-    // AND compare newly imported item levels against village_history_YYYY_MM to track completed upgrades
+    // Sync Monthly Baseline (`village_baseline_${YYYY_MM}_${PLAYER_TAG}`) and
+    // Monthly History (`village_history_${YYYY_MM}_${PLAYER_TAG}`) on JSON import
     const existingBoundTag = !isAddingNewAccount
       ? accounts.find((a) => a.id === activeAccountId)?.tag?.trim()
       : undefined;
     const resolvedImportPlayerTag = (extractedTag || existingBoundTag || '').trim().toUpperCase();
     const currentMonthKey = getCurrentYearMonthKey(new Date(importNow));
 
-    const currentHistory = loadVillageMonthlyHistory(resolvedImportPlayerTag, currentMonthKey);
-    const nextHistoryUpgrades: Record<string, VillageHistoryUpgradeEntry> = {
-      ...currentHistory.upgrades,
-    };
-    const baselineLevels = loadVillageBaselineLevels(resolvedImportPlayerTag, currentMonthKey);
-
-    // Map previously active upgrades in the app before this import so we also catch upgrades that just finished
-    const previousActiveUpgradesById: Record<string, number> = {};
-    if (!isAddingNewAccount) {
-      for (const prevB of builders) {
-        if (prevB.rawId && typeof prevB.upgradeLevel === 'number' && prevB.upgradeLevel > 0) {
-          const prevMin = previousActiveUpgradesById[prevB.rawId];
-          if (prevMin === undefined || prevB.upgradeLevel < prevMin) {
-            previousActiveUpgradesById[prevB.rawId] = prevB.upgradeLevel;
-          }
-        }
-      }
-      for (const prevLocked of lockedResults) {
-        if (
-          prevLocked.rawId &&
-          typeof prevLocked.upgradeLevel === 'number' &&
-          prevLocked.upgradeLevel > 0
-        ) {
-          const prevMin = previousActiveUpgradesById[prevLocked.rawId];
-          if (prevMin === undefined || prevLocked.upgradeLevel < prevMin) {
-            previousActiveUpgradesById[prevLocked.rawId] = prevLocked.upgradeLevel;
-          }
-        }
-      }
-      if (labTimer.rawId && typeof labTimer.upgradeLevel === 'number' && labTimer.upgradeLevel > 0) {
-        previousActiveUpgradesById[labTimer.rawId] = labTimer.upgradeLevel;
-      }
-      if (
-        goblinLabTimer.rawId &&
-        typeof goblinLabTimer.upgradeLevel === 'number' &&
-        goblinLabTimer.upgradeLevel > 0
-      ) {
-        previousActiveUpgradesById[goblinLabTimer.rawId] = goblinLabTimer.upgradeLevel;
-      }
-      if (petTimer.rawId && typeof petTimer.upgradeLevel === 'number' && petTimer.upgradeLevel > 0) {
-        previousActiveUpgradesById[petTimer.rawId] = petTimer.upgradeLevel;
-      }
-    }
-
-    // Collect highest observed level per item ID across all imported village arrays
-    const allImportedVillageItems: RawCoCItem[] = [
-      ...homeItems,
-      ...labItems,
-      ...petItems,
-      ...rawHelpers,
-    ];
-    const importedMaxLevelById: Record<string, number> = {};
-    for (const rawItem of allImportedVillageItems) {
-      if (!rawItem) continue;
-      const itemId = String(rawItem.data ?? rawItem.id ?? '').trim();
-      const itemLvl =
-        typeof rawItem.lvl === 'number' && Number.isFinite(rawItem.lvl)
-          ? Math.floor(rawItem.lvl)
-          : 0;
-      if (!itemId || itemLvl <= 0) continue;
-      if (importedMaxLevelById[itemId] === undefined || itemLvl > importedMaxLevelById[itemId]) {
-        importedMaxLevelById[itemId] = itemLvl;
-      }
-    }
-
-    // Compare newly imported levels against existing village_history.upgrades, baselineLevels, and previous active timers
-    for (const [itemId, newLevel] of Object.entries(importedMaxLevelById)) {
-      const resolvedItemName = resolveUpgradeName(itemId, `Item ${itemId}`);
-      const existingUpgradeEntry = nextHistoryUpgrades[itemId];
-      const prevBaselineLvl = baselineLevels[itemId];
-      const prevActiveUpgradeLvl = previousActiveUpgradesById[itemId];
-
-      if (existingUpgradeEntry) {
-        if (newLevel > existingUpgradeEntry.currentLevel) {
-          nextHistoryUpgrades[itemId] = {
-            name: resolvedItemName,
-            startLevel: existingUpgradeEntry.startLevel,
-            currentLevel: newLevel,
-          };
-        }
-      } else if (typeof prevBaselineLvl === 'number' && newLevel > prevBaselineLvl) {
-        nextHistoryUpgrades[itemId] = {
-          name: resolvedItemName,
-          startLevel: prevBaselineLvl,
-          currentLevel: newLevel,
-        };
-      } else if (typeof prevActiveUpgradeLvl === 'number' && newLevel > prevActiveUpgradeLvl) {
-        nextHistoryUpgrades[itemId] = {
-          name: resolvedItemName,
-          startLevel: prevActiveUpgradeLvl,
-          currentLevel: newLevel,
-        };
-      }
-
-      baselineLevels[itemId] =
-        typeof prevBaselineLvl === 'number' ? Math.max(prevBaselineLvl, newLevel) : newLevel;
-    }
-
-    saveVillageBaselineLevels(baselineLevels, resolvedImportPlayerTag, currentMonthKey);
-
-    const nextHistoryPotions = {
-      builder: { ...currentHistory.potions.builder },
-      research: { ...currentHistory.potions.research },
-      pet: { ...currentHistory.potions.pet },
-    };
-
-    if (resolvedImportPlayerTag) {
-      const prevBoostTrack = loadLastImportedBoostState(resolvedImportPlayerTag);
-      const updatedMonthlyStats = loadMonthlyStatsForTag(resolvedImportPlayerTag, currentMonthKey);
-
-      const activeBuildersForBoostStats =
-        totalLoadedBuilders > 0 ? totalLoadedBuilders : nextBuilderSliderCount;
-
-      // 1. Builder Potions: potionCount = Math.ceil(builderBoostRemainingSeconds / 3600),
-      //    secondsSaved = potionCount * activeBuilders * 9 * 3600
-      const builderTrackRes = computeNewlyCreditedBoostPotions(
-        builderBoostSeconds,
-        prevBoostTrack.builder,
-        importNow,
-        jsonExportTimestamp
-      );
-      if (builderTrackRes.potionsToCredit > 0) {
-        const builderSecondsSavedToAdd =
-          builderTrackRes.potionsToCredit * activeBuildersForBoostStats * 9 * 3600;
-        updatedMonthlyStats.builderPotionsCount += builderTrackRes.potionsToCredit;
-        updatedMonthlyStats.builderSecondsSaved += builderSecondsSavedToAdd;
-        nextHistoryPotions.builder.used = Math.max(
-          nextHistoryPotions.builder.used + builderTrackRes.potionsToCredit,
-          updatedMonthlyStats.builderPotionsCount
-        );
-        nextHistoryPotions.builder.timeSavedMinutes = Math.max(
-          nextHistoryPotions.builder.timeSavedMinutes + Math.round(builderSecondsSavedToAdd / 60),
-          Math.round(updatedMonthlyStats.builderSecondsSaved / 60)
-        );
-        saveMonthlySectionStatsForTag(
-          resolvedImportPlayerTag,
-          'builders',
-          updatedMonthlyStats,
-          currentMonthKey
-        );
-      }
-
-      // 2. Research Potions: potionCount = Math.ceil(researchBoostRemainingSeconds / 3600),
-      //    secondsSaved = potionCount * 23 * 3600
-      const labTrackRes = computeNewlyCreditedBoostPotions(
-        labBoostSeconds,
-        prevBoostTrack.lab,
-        importNow,
-        jsonExportTimestamp
-      );
-      if (labTrackRes.potionsToCredit > 0) {
-        const labSecondsSavedToAdd = labTrackRes.potionsToCredit * 23 * 3600;
-        updatedMonthlyStats.researchPotionsCount += labTrackRes.potionsToCredit;
-        updatedMonthlyStats.labSecondsSaved += labSecondsSavedToAdd;
-        nextHistoryPotions.research.used = Math.max(
-          nextHistoryPotions.research.used + labTrackRes.potionsToCredit,
-          updatedMonthlyStats.researchPotionsCount
-        );
-        nextHistoryPotions.research.timeSavedMinutes = Math.max(
-          nextHistoryPotions.research.timeSavedMinutes + Math.round(labSecondsSavedToAdd / 60),
-          Math.round(updatedMonthlyStats.labSecondsSaved / 60)
-        );
-        saveMonthlySectionStatsForTag(
-          resolvedImportPlayerTag,
-          'lab',
-          updatedMonthlyStats,
-          currentMonthKey
-        );
-      }
-
-      // 3. Pet Potions: potionCount = Math.ceil(petBoostRemainingSeconds / 3600),
-      //    secondsSaved = potionCount * 23 * 3600
-      const petTrackRes = computeNewlyCreditedBoostPotions(
-        petBoostSeconds,
-        prevBoostTrack.pet,
-        importNow,
-        jsonExportTimestamp
-      );
-      if (petTrackRes.potionsToCredit > 0) {
-        const petSecondsSavedToAdd = petTrackRes.potionsToCredit * 23 * 3600;
-        updatedMonthlyStats.petPotionsCount += petTrackRes.potionsToCredit;
-        updatedMonthlyStats.petSecondsSaved += petSecondsSavedToAdd;
-        nextHistoryPotions.pet.used = Math.max(
-          nextHistoryPotions.pet.used + petTrackRes.potionsToCredit,
-          updatedMonthlyStats.petPotionsCount
-        );
-        nextHistoryPotions.pet.timeSavedMinutes = Math.max(
-          nextHistoryPotions.pet.timeSavedMinutes + Math.round(petSecondsSavedToAdd / 60),
-          Math.round(updatedMonthlyStats.petSecondsSaved / 60)
-        );
-        saveMonthlySectionStatsForTag(
-          resolvedImportPlayerTag,
-          'pethouse',
-          updatedMonthlyStats,
-          currentMonthKey
-        );
-      }
-
-      saveLastImportedBoostState(resolvedImportPlayerTag, {
-        ...(builderTrackRes.nextEntry ? { builder: builderTrackRes.nextEntry } : {}),
-        ...(labTrackRes.nextEntry ? { lab: labTrackRes.nextEntry } : {}),
-        ...(petTrackRes.nextEntry ? { pet: petTrackRes.nextEntry } : {}),
-      });
-    }
-
-    const updatedHistoryObj: VillageMonthlyHistory = {
-      potions: nextHistoryPotions,
-      upgrades: nextHistoryUpgrades,
-    };
-    saveVillageMonthlyHistory(updatedHistoryObj, resolvedImportPlayerTag, currentMonthKey);
+    const updatedHistoryObj = syncMonthlyBaselineAndHistoryOnImport(
+      parsedData,
+      resolvedImportPlayerTag,
+      currentMonthKey
+    );
     setMonthlyHistory(updatedHistoryObj);
     setMonthlyStats({
       builderPotionsCount: updatedHistoryObj.potions.builder.used,
