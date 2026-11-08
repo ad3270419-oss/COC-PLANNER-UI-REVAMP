@@ -5,6 +5,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import { ITEM_NAMES_BY_ID, UpgradeAssetIcon, getTownHallIconSrc } from './cocAssets';
 
 export const COC_NAMES: Record<string | number, string> = {
   // Town Hall & Key Buildings
@@ -78,8 +79,8 @@ export const COC_NAMES: Record<string | number, string> = {
   93000002: "Prospector"
 };
 
-// Merge Pets, Troops & Siege Machines, and Spells into COC_NAMES
-Object.assign(COC_NAMES, {
+// Merge Pets, Troops & Siege Machines, Spells, and item_names.json into COC_NAMES
+Object.assign(COC_NAMES, ITEM_NAMES_BY_ID, {
   // --- PETS (73000000 series) ---
   73000000: "L.A.S.S.I",
   73000001: "Mighty Yak",
@@ -325,6 +326,245 @@ function getCurrentMonthDateRangeLabel(now = new Date()): string {
   const monthName = now.toLocaleString('en-US', { month: 'long' });
   const lastDay = new Date(year, monthIndex + 1, 0).getDate();
   return `${monthName} 1 - ${monthName} ${lastDay}`;
+}
+
+export interface VillageHistoryPotionStat {
+  used: number;
+  timeSavedMinutes: number;
+}
+
+export interface VillageHistoryUpgradeEntry {
+  name: string;
+  startLevel: number;
+  currentLevel: number;
+}
+
+export interface VillageMonthlyHistory {
+  potions: {
+    builder: VillageHistoryPotionStat;
+    research: VillageHistoryPotionStat;
+    pet: VillageHistoryPotionStat;
+  };
+  upgrades: Record<string, VillageHistoryUpgradeEntry>;
+}
+
+function createEmptyVillageMonthlyHistory(): VillageMonthlyHistory {
+  return {
+    potions: {
+      builder: { used: 0, timeSavedMinutes: 0 },
+      research: { used: 0, timeSavedMinutes: 0 },
+      pet: { used: 0, timeSavedMinutes: 0 },
+    },
+    upgrades: {},
+  };
+}
+
+function getVillageHistoryStorageKey(yearMonthKey = getCurrentYearMonthKey()): string {
+  return `village_history_${yearMonthKey}`;
+}
+
+function getScopedVillageHistoryStorageKey(
+  playerTag: string | undefined | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): string {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  return cleanedTag
+    ? `village_history_${cleanedTag}_${yearMonthKey}`
+    : getVillageHistoryStorageKey(yearMonthKey);
+}
+
+function getVillageBaselineStorageKey(
+  playerTag: string | undefined | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): string {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  return cleanedTag
+    ? `village_baseline_${cleanedTag}_${yearMonthKey}`
+    : `village_baseline_${yearMonthKey}`;
+}
+
+function normalizeVillageMonthlyHistory(raw: unknown): VillageMonthlyHistory {
+  const fallback = createEmptyVillageMonthlyHistory();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fallback;
+  const obj = raw as Record<string, unknown>;
+  const rawPotions =
+    obj.potions && typeof obj.potions === 'object' && !Array.isArray(obj.potions)
+      ? (obj.potions as Record<string, unknown>)
+      : {};
+
+  const parsePotionStat = (val: unknown): VillageHistoryPotionStat => {
+    if (!val || typeof val !== 'object' || Array.isArray(val)) {
+      return { used: 0, timeSavedMinutes: 0 };
+    }
+    const rec = val as Record<string, unknown>;
+    return {
+      used:
+        typeof rec.used === 'number' && Number.isFinite(rec.used) && rec.used >= 0
+          ? Math.floor(rec.used)
+          : 0,
+      timeSavedMinutes:
+        typeof rec.timeSavedMinutes === 'number' &&
+        Number.isFinite(rec.timeSavedMinutes) &&
+        rec.timeSavedMinutes >= 0
+          ? Math.floor(rec.timeSavedMinutes)
+          : 0,
+    };
+  };
+
+  const rawUpgrades =
+    obj.upgrades && typeof obj.upgrades === 'object' && !Array.isArray(obj.upgrades)
+      ? (obj.upgrades as Record<string, unknown>)
+      : {};
+  const upgrades: Record<string, VillageHistoryUpgradeEntry> = {};
+
+  for (const [id, entryVal] of Object.entries(rawUpgrades)) {
+    if (!entryVal || typeof entryVal !== 'object' || Array.isArray(entryVal)) continue;
+    const rec = entryVal as Record<string, unknown>;
+    const startLevel =
+      typeof rec.startLevel === 'number' && Number.isFinite(rec.startLevel)
+        ? Math.floor(rec.startLevel)
+        : 0;
+    const currentLevel =
+      typeof rec.currentLevel === 'number' && Number.isFinite(rec.currentLevel)
+        ? Math.floor(rec.currentLevel)
+        : 0;
+    if (startLevel >= 0 && currentLevel > 0) {
+      upgrades[id] = {
+        name:
+          typeof rec.name === 'string' && rec.name.trim()
+            ? rec.name.trim()
+            : resolveUpgradeName(id, `Item ${id}`),
+        startLevel,
+        currentLevel,
+      };
+    }
+  }
+
+  return {
+    potions: {
+      builder: parsePotionStat(rawPotions.builder),
+      research: parsePotionStat(rawPotions.research),
+      pet: parsePotionStat(rawPotions.pet),
+    },
+    upgrades,
+  };
+}
+
+function saveVillageMonthlyHistory(
+  history: VillageMonthlyHistory,
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): void {
+  const payload = JSON.stringify({
+    potions: history.potions,
+    upgrades: history.upgrades,
+  });
+  try {
+    // Always write to the canonical village_history_YYYY_MM key for the active village
+    localStorage.setItem(getVillageHistoryStorageKey(yearMonthKey), payload);
+    if (playerTag && playerTag.trim()) {
+      localStorage.setItem(
+        getScopedVillageHistoryStorageKey(playerTag, yearMonthKey),
+        payload
+      );
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function loadVillageMonthlyHistory(
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): VillageMonthlyHistory {
+  let history = createEmptyVillageMonthlyHistory();
+  try {
+    const scopedKey = getScopedVillageHistoryStorageKey(playerTag, yearMonthKey);
+    const defaultKey = getVillageHistoryStorageKey(yearMonthKey);
+    const raw =
+      (playerTag?.trim() ? localStorage.getItem(scopedKey) : null) ||
+      localStorage.getItem(defaultKey);
+    if (raw) {
+      history = normalizeVillageMonthlyHistory(JSON.parse(raw));
+    }
+  } catch {
+    // Ignore parse errors
+  }
+
+  // Merge any existing legacy clash_stats_* counts so nothing is ever lost
+  if (playerTag?.trim()) {
+    const legacy = loadMonthlyStatsForTag(playerTag, yearMonthKey);
+    const mergedBuilderUsed = Math.max(history.potions.builder.used, legacy.builderPotionsCount);
+    const mergedBuilderMins = Math.max(
+      history.potions.builder.timeSavedMinutes,
+      Math.round(legacy.builderSecondsSaved / 60)
+    );
+    const mergedResearchUsed = Math.max(
+      history.potions.research.used,
+      legacy.researchPotionsCount
+    );
+    const mergedResearchMins = Math.max(
+      history.potions.research.timeSavedMinutes,
+      Math.round(legacy.labSecondsSaved / 60)
+    );
+    const mergedPetUsed = Math.max(history.potions.pet.used, legacy.petPotionsCount);
+    const mergedPetMins = Math.max(
+      history.potions.pet.timeSavedMinutes,
+      Math.round(legacy.petSecondsSaved / 60)
+    );
+    history = {
+      ...history,
+      potions: {
+        builder: { used: mergedBuilderUsed, timeSavedMinutes: mergedBuilderMins },
+        research: { used: mergedResearchUsed, timeSavedMinutes: mergedResearchMins },
+        pet: { used: mergedPetUsed, timeSavedMinutes: mergedPetMins },
+      },
+    };
+  }
+
+  saveVillageMonthlyHistory(history, playerTag, yearMonthKey);
+  return history;
+}
+
+function loadVillageBaselineLevels(
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): Record<string, number> {
+  try {
+    const scopedKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+    const defaultKey = getVillageBaselineStorageKey(null, yearMonthKey);
+    const raw =
+      (playerTag?.trim() ? localStorage.getItem(scopedKey) : null) ||
+      localStorage.getItem(defaultKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const result: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+        result[k] = Math.floor(v);
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function saveVillageBaselineLevels(
+  baseline: Record<string, number>,
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): void {
+  const payload = JSON.stringify(baseline);
+  try {
+    localStorage.setItem(getVillageBaselineStorageKey(null, yearMonthKey), payload);
+    if (playerTag?.trim()) {
+      localStorage.setItem(getVillageBaselineStorageKey(playerTag, yearMonthKey), payload);
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
 }
 
 function getMonthlySectionStorageKey(
@@ -2943,6 +3183,487 @@ const HelperObsidianCard: React.FC<{
   }
 );
 
+function formatLedgerCompactDuration(parts: {
+  isFinished: boolean;
+  d: number;
+  h: number;
+  m: number;
+  s: number;
+}): string {
+  if (parts.isFinished) return 'Finished';
+  const tokens: string[] = [];
+  if (parts.d > 0) tokens.push(`${parts.d}d`);
+  if (parts.h > 0) tokens.push(`${parts.h}h`);
+  if (parts.m > 0 || (parts.d === 0 && parts.h === 0)) tokens.push(`${parts.m}m`);
+  if (parts.d === 0 && parts.h === 0) tokens.push(`${parts.s}s`);
+  return tokens.join(' ');
+}
+
+function formatQuickStatDuration(parts: {
+  isFinished: boolean;
+  d: number;
+  h: number;
+  m: number;
+  s: number;
+}): string {
+  if (parts.isFinished) return 'Free';
+  if (parts.d > 0) {
+    return parts.h > 0 ? `${parts.d}d ${parts.h}h` : `${parts.d}d ${parts.m}m`;
+  }
+  if (parts.h > 0) {
+    return `${parts.h}h ${parts.m}m`;
+  }
+  return `${parts.m}m ${parts.s}s`;
+}
+
+const LedgerQuickStatsRow: React.FC<{
+  busyRegularCount: number;
+  regularCap: number;
+  isGoblinBusy: boolean;
+  soonestBuilderItem: LockedResultItem | null;
+  builderBoostEndTime: number | null;
+  builderApprentice: BuilderApprenticeState;
+  targetLabTimestamp: number | null;
+  targetGoblinLabTimestamp: number | null;
+  labBoostEndTime: number | null;
+  labApprentice: LabApprenticeState;
+}> = React.memo(
+  ({
+    busyRegularCount,
+    regularCap,
+    isGoblinBusy,
+    soonestBuilderItem,
+    builderBoostEndTime,
+    builderApprentice,
+    targetLabTimestamp,
+    targetGoblinLabTimestamp,
+    labBoostEndTime,
+    labApprentice,
+  }) => {
+    const computeSnapshot = (now: number) => {
+      let nextFreeText = 'All Free';
+      if (soonestBuilderItem && soonestBuilderItem.targetTimestamp > now) {
+        const isAssigned = builderApprentice.assignedSlot === soonestBuilderItem.builderIndex;
+        const cycle = isAssigned ? getHelperCycleStateAt(builderApprentice, now) : null;
+        const parts = computeTimeParts(
+          soonestBuilderItem.targetTimestamp,
+          cycle && cycle.isWorkingNow
+            ? cycle.activeRemSec > 0
+              ? now + cycle.activeRemSec * 1000
+              : builderApprentice.activeSessionEndTime
+            : null,
+          getHelperSpeedMultiplier(builderApprentice.level),
+          builderBoostEndTime,
+          10,
+          now,
+          builderApprentice,
+          isAssigned
+        );
+        nextFreeText = parts.isFinished ? 'Free' : formatQuickStatDuration(parts);
+      }
+
+      let nextLabText = 'Idle';
+      const candidates: Array<{ ts: number; slot: 'main' | 'goblin' }> = [];
+      if (targetLabTimestamp && targetLabTimestamp > now) {
+        candidates.push({ ts: targetLabTimestamp, slot: 'main' });
+      }
+      if (targetGoblinLabTimestamp && targetGoblinLabTimestamp > now) {
+        candidates.push({ ts: targetGoblinLabTimestamp, slot: 'goblin' });
+      }
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a.ts - b.ts);
+        const soonestLab = candidates[0];
+        const isLabHelperHere = labApprentice.assignedSlot === soonestLab.slot;
+        const labCycle = isLabHelperHere ? getHelperCycleStateAt(labApprentice, now) : null;
+        const labParts = computeTimeParts(
+          soonestLab.ts,
+          labCycle && labCycle.isWorkingNow
+            ? labCycle.activeRemSec > 0
+              ? now + labCycle.activeRemSec * 1000
+              : labApprentice.activeSessionEndTime
+            : null,
+          getHelperSpeedMultiplier(labApprentice.level),
+          labBoostEndTime,
+          24,
+          now,
+          labApprentice,
+          isLabHelperHere
+        );
+        nextLabText = labParts.isFinished ? 'Idle' : formatQuickStatDuration(labParts);
+      }
+
+      return { nextFreeText, nextLabText };
+    };
+
+    const [stats, setStats] = useState(() => computeSnapshot(Date.now()));
+
+    useEffect(() => {
+      const update = (now: number) => {
+        const next = computeSnapshot(now);
+        setStats((prev) =>
+          prev.nextFreeText === next.nextFreeText && prev.nextLabText === next.nextLabText
+            ? prev
+            : next
+        );
+      };
+      update(Date.now());
+      return subscribeMasterTick(update);
+    }, [
+      soonestBuilderItem,
+      builderBoostEndTime,
+      builderApprentice,
+      targetLabTimestamp,
+      targetGoblinLabTimestamp,
+      labBoostEndTime,
+      labApprentice,
+    ]);
+
+    return (
+      <div className="grid grid-cols-3 gap-2.5">
+        {/* Card 1: BUILDERS */}
+        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+          <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
+            <span className="text-[#F3CA65]" aria-hidden="true">🔨</span>
+            <span>BUILDERS</span>
+          </div>
+          <div className="text-lg sm:text-2xl font-extrabold text-[#F3CA65] tracking-tight tabular-nums mt-1.5">
+            {busyRegularCount} / {regularCap}
+            {isGoblinBusy ? ' + G' : ''}
+          </div>
+        </div>
+
+        {/* Card 2: NEXT FREE */}
+        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+          <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
+            <span className="text-[#4ADE80]" aria-hidden="true">🕒</span>
+            <span>NEXT FREE</span>
+          </div>
+          <div className="text-lg sm:text-2xl font-extrabold text-[#4ADE80] tracking-tight tabular-nums mt-1.5 truncate">
+            {stats.nextFreeText}
+          </div>
+        </div>
+
+        {/* Card 3: NEXT LAB */}
+        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+          <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
+            <span className="text-[#93C5FD]" aria-hidden="true">🕒</span>
+            <span>NEXT LAB</span>
+          </div>
+          <div className="text-lg sm:text-2xl font-extrabold text-[#93C5FD] tracking-tight tabular-nums mt-1.5 truncate">
+            {stats.nextLabText}
+          </div>
+        </div>
+      </div>
+    );
+  }
+);
+
+const LedgerUpgradeQueueCard: React.FC<{
+  rawId?: string;
+  upgradeTitle: string;
+  upgradeLevel?: number;
+  slotBadge: string;
+  isGoblin?: boolean;
+  isFinishingNext?: boolean;
+  category: 'builders' | 'laboratory' | 'pethouse';
+  targetTimestamp: number;
+  displayDate: string;
+  helper?:
+    | {
+        level: number;
+        assignedSlot: number | 'main' | 'goblin' | null;
+        activeSessionEndTime: number | null;
+        cooldownEndTime: number | null;
+        recurrent?: boolean;
+      }
+    | null;
+  isHelperAssignedToSlot?: boolean;
+  helperIcon?: string;
+  helperBoostEndTime?: number | null;
+  helperSpeedMultiplier?: number;
+  potionBoostEndTime?: number | null;
+  potionSpeedMultiplier?: number;
+  onActionClick?: () => void;
+  onFinish?: () => void;
+}> = React.memo(
+  ({
+    rawId,
+    upgradeTitle,
+    upgradeLevel,
+    slotBadge,
+    isGoblin = false,
+    isFinishingNext = false,
+    category,
+    targetTimestamp,
+    displayDate,
+    helper = null,
+    isHelperAssignedToSlot = false,
+    helperIcon = '👷',
+    helperBoostEndTime = null,
+    helperSpeedMultiplier = 1,
+    potionBoostEndTime = null,
+    potionSpeedMultiplier = 1,
+    onActionClick,
+    onFinish,
+  }) => {
+    const [showDetailedTicker, setShowDetailedTicker] = useState(false);
+
+    const computeCardState = (now: number) => {
+      const parts = computeTimeParts(
+        targetTimestamp,
+        helperBoostEndTime,
+        helperSpeedMultiplier,
+        potionBoostEndTime,
+        potionSpeedMultiplier,
+        now,
+        helper,
+        isHelperAssignedToSlot
+      );
+
+      const pActive =
+        !!potionBoostEndTime && potionBoostEndTime > now && potionSpeedMultiplier > 1;
+      const hRate = helper ? getHelperSpeedMultiplier(helper.level) : helperSpeedMultiplier;
+      const cycle =
+        helper && isHelperAssignedToSlot ? getHelperCycleStateAt(helper, now) : null;
+      const hWorking =
+        cycle !== null
+          ? cycle.isWorkingNow && hRate >= 1
+          : !!helperBoostEndTime && helperBoostEndTime > now && hRate >= 1;
+
+      let boostBadge: string | null = null;
+      if (pActive && hWorking) {
+        boostBadge = `⚡ ${potionSpeedMultiplier + hRate}x`;
+      } else if (pActive) {
+        boostBadge = `⚡ ${potionSpeedMultiplier}x`;
+      } else if (hWorking) {
+        boostBadge = `${helperIcon} ${hRate}x Active`;
+      }
+
+      // Compute subtle progress percentage based on remaining seconds relative to typical tier window
+      const remSec = parts.totalUpgradeSeconds;
+      const windowSec = Math.max(remSec, 14 * 86400);
+      const progressPct = parts.isFinished
+        ? 100
+        : Math.min(96, Math.max(8, Math.round((1 - remSec / (windowSec * 1.15)) * 100)));
+
+      return {
+        isFinished: parts.isFinished,
+        compactTime: formatLedgerCompactDuration(parts),
+        boostBadge,
+        progressPct,
+      };
+    };
+
+    const [liveState, setLiveState] = useState(() => computeCardState(Date.now()));
+    const wasRunningRef = useRef<boolean>(!liveState.isFinished);
+    const onFinishRef = useRef(onFinish);
+    onFinishRef.current = onFinish;
+
+    useEffect(() => {
+      const sync = (now: number, isInitial: boolean) => {
+        const next = computeCardState(now);
+        if (now >= targetTimestamp || next.isFinished) {
+          if (wasRunningRef.current && !isInitial) {
+            wasRunningRef.current = false;
+            triggerHaptic([30, 50, 30]);
+            onFinishRef.current?.();
+          } else if (isInitial && next.isFinished) {
+            wasRunningRef.current = false;
+            onFinishRef.current?.();
+          }
+        } else {
+          wasRunningRef.current = true;
+        }
+        setLiveState((prev) =>
+          prev.isFinished === next.isFinished &&
+          prev.compactTime === next.compactTime &&
+          prev.boostBadge === next.boostBadge &&
+          prev.progressPct === next.progressPct
+            ? prev
+            : next
+        );
+      };
+
+      sync(Date.now(), true);
+      return subscribeMasterTick((now) => sync(now, false));
+    }, [
+      targetTimestamp,
+      helperBoostEndTime,
+      helperSpeedMultiplier,
+      helper,
+      isHelperAssignedToSlot,
+      potionBoostEndTime,
+      potionSpeedMultiplier,
+    ]);
+
+    const barColorClass = isGoblin
+      ? 'bg-[#4ADE80]'
+      : category === 'laboratory'
+      ? 'bg-[#818CF8]'
+      : category === 'pethouse'
+      ? 'bg-[#38BDF8]'
+      : 'bg-[#F3CA65]';
+
+    const helperFooterNote =
+      helper && isHelperAssignedToSlot
+        ? ` · Apprentice · ${helper.recurrent !== false ? 'repeat forecast on' : 'repeat forecast off'}`
+        : '';
+
+    return (
+      <div
+        className={`ledger-queue-card p-4 transition-all ${
+          isGoblin ? 'border-[#4ADE80]/30' : 'border-[#2A303C]'
+        }`}
+      >
+        <div className="flex items-center gap-3.5">
+          {/* Left: Dark rounded-square .webp icon container */}
+          <UpgradeAssetIcon
+            rawId={rawId}
+            upgradeTitle={upgradeTitle}
+            upgradeLevel={upgradeLevel}
+            category={category}
+          />
+
+          {/* Middle & Right: Name, Level Transition, Builder Pill, and Large Time Remaining */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-base sm:text-[17px] font-bold text-white truncate leading-snug">
+                {upgradeTitle}
+              </h4>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  if (onActionClick) {
+                    onActionClick();
+                  } else {
+                    setShowDetailedTicker((prev) => !prev);
+                  }
+                }}
+                title="Inspect or assign helper boost"
+                className="tactile text-[#F3CA65] hover:text-amber-300 text-sm font-bold px-1.5 py-0.5 rounded-lg hover:bg-white/5 cursor-pointer shrink-0"
+              >
+                →
+              </button>
+            </div>
+
+            {/* Level Transition + Builder/Goblin Pill Tags */}
+            <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+              {typeof upgradeLevel === 'number' && (
+                <span
+                  className={`text-[11px] font-bold tracking-wider uppercase ${
+                    isGoblin ? 'text-[#4ADE80]' : 'text-[#8E9AA8]'
+                  }`}
+                >
+                  LEVEL {upgradeLevel} → {upgradeLevel + 1}
+                </span>
+              )}
+
+              {isGoblin ? (
+                <span className="slot-badge-goblin">
+                  {slotBadge === '[GOBLIN]' ? '• GOBLIN' : slotBadge}
+                </span>
+              ) : (
+                <span
+                  className={
+                    category === 'laboratory'
+                      ? 'slot-badge-hero'
+                      : category === 'pethouse'
+                      ? 'slot-badge-goblin'
+                      : 'slot-badge-regular'
+                  }
+                >
+                  {slotBadge}
+                </span>
+              )}
+
+              {isFinishingNext && (
+                <span className="slot-badge-goblin">NEXT FREE</span>
+              )}
+
+              {liveState.boostBadge && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-extrabold bg-[#4ADE80]/15 text-[#4ADE80] border border-[#4ADE80]/35">
+                  {liveState.boostBadge}
+                </span>
+              )}
+            </div>
+
+            {/* Large Highly Readable Time Remaining */}
+            <div className="mt-1.5 flex items-baseline justify-between gap-2">
+              {liveState.isFinished ? (
+                <span className="text-sm sm:text-base font-extrabold text-[#4ADE80] uppercase tracking-wide">
+                  ⚡ Upgrade Completed!
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic(10);
+                    setShowDetailedTicker((prev) => !prev);
+                  }}
+                  className="text-left text-xl sm:text-2xl font-extrabold text-white tracking-tight tabular-nums cursor-pointer hover:text-[#F3CA65] transition-colors"
+                  title="Tap to toggle second-by-second HUD ticker"
+                >
+                  {liveState.compactTime}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Optional Expandable 4-Unit Second-by-Second HUD Ticker */}
+        {showDetailedTicker && !liveState.isFinished && (
+          <div className="mt-3 pt-3 border-t border-[#242B38]">
+            <LiveHudTicker
+              targetTimestamp={targetTimestamp}
+              helper={helper}
+              isHelperAssignedToSlot={isHelperAssignedToSlot}
+              helperIcon={helperIcon}
+              helperBoostEndTime={helperBoostEndTime}
+              helperSpeedMultiplier={helperSpeedMultiplier}
+              potionBoostEndTime={potionBoostEndTime}
+              potionSpeedMultiplier={potionSpeedMultiplier}
+              accentColorClass={
+                isGoblin
+                  ? 'text-[#4ADE80]'
+                  : category === 'laboratory'
+                  ? 'text-[#A78BFA]'
+                  : 'text-[#F3CA65]'
+              }
+            />
+          </div>
+        )}
+
+        {/* Thin Horizontal Progress Bar */}
+        <div className="w-full h-1.5 bg-[#232A39] rounded-full overflow-hidden mt-3.5 mb-2">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${barColorClass}`}
+            style={{ width: `${liveState.progressPct}%` }}
+          />
+        </div>
+
+        {/* Exact Completion Date Footer */}
+        <div className="flex items-center justify-between gap-2 text-[11px] font-semibold text-[#8E9AA8]">
+          <span className="truncate">
+            ↗ {displayDate}
+            {helperFooterNote}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic(10);
+              setShowDetailedTicker((prev) => !prev);
+            }}
+            className="text-[10px] font-bold text-[#8E9AA8] hover:text-white shrink-0 cursor-pointer"
+          >
+            {showDetailedTicker ? 'Hide seconds' : 'Live seconds'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+);
+
 export default function App() {
   const initialMulti = loadMultiAccountStorage();
   const initialActiveProfile =
@@ -3122,6 +3843,9 @@ export default function App() {
   const [monthlyStats, setMonthlyStats] = useState<MonthlySectionStats>(() =>
     loadMonthlyStatsForTag(initialActiveProfile.tag)
   );
+  const [monthlyHistory, setMonthlyHistory] = useState<VillageMonthlyHistory>(() =>
+    loadVillageMonthlyHistory(initialActiveProfile.tag)
+  );
   const [summaryModalSection, setSummaryModalSection] = useState<
     'builders' | 'lab' | 'pethouse' | null
   >(null);
@@ -3146,9 +3870,18 @@ export default function App() {
   const activePlayerTag = activeAccountProfile?.tag?.trim() || '';
   const activeYearMonthKey = getCurrentYearMonthKey(new Date(nowTick));
 
-  // Automatically load isolated monthly stats when switching accounts, locking a tag, or rolling into a new calendar month
+  // Automatically load isolated monthly stats & village_history_YYYY_MM when switching accounts, locking a tag, or rolling into a new calendar month
   useEffect(() => {
-    setMonthlyStats(loadMonthlyStatsForTag(activePlayerTag, activeYearMonthKey));
+    const loadedHistory = loadVillageMonthlyHistory(activePlayerTag, activeYearMonthKey);
+    setMonthlyHistory(loadedHistory);
+    setMonthlyStats({
+      builderPotionsCount: loadedHistory.potions.builder.used,
+      builderSecondsSaved: loadedHistory.potions.builder.timeSavedMinutes * 60,
+      researchPotionsCount: loadedHistory.potions.research.used,
+      labSecondsSaved: loadedHistory.potions.research.timeSavedMinutes * 60,
+      petPotionsCount: loadedHistory.potions.pet.used,
+      petSecondsSaved: loadedHistory.potions.pet.timeSavedMinutes * 60,
+    });
   }, [activeAccountId, activePlayerTag, activeYearMonthKey]);
 
   const recordConfirmedPotionUsage = (
@@ -3156,27 +3889,52 @@ export default function App() {
     addedSecondsSaved: number,
     addedPotionsCount: number
   ) => {
-    // Stats tracking begins ONLY after an account is added and its unique player tag is locked
-    if (!activePlayerTag || addedPotionsCount <= 0 || addedSecondsSaved <= 0) {
+    if (addedPotionsCount <= 0 || addedSecondsSaved <= 0) {
       return;
     }
     const currentMonthKey = getCurrentYearMonthKey(new Date());
-    const existing = loadMonthlyStatsForTag(activePlayerTag, currentMonthKey);
-    const updated: MonthlySectionStats = { ...existing };
+    const addedMinutes = Math.max(1, Math.round(addedSecondsSaved / 60));
+
+    // 1. Always update village_history_YYYY_MM
+    const currentHistory = loadVillageMonthlyHistory(activePlayerTag, currentMonthKey);
+    const updatedHistory: VillageMonthlyHistory = {
+      ...currentHistory,
+      potions: {
+        builder: { ...currentHistory.potions.builder },
+        research: { ...currentHistory.potions.research },
+        pet: { ...currentHistory.potions.pet },
+      },
+      upgrades: { ...currentHistory.upgrades },
+    };
 
     if (section === 'builders') {
-      updated.builderSecondsSaved += Math.round(addedSecondsSaved);
-      updated.builderPotionsCount += Math.round(addedPotionsCount);
+      updatedHistory.potions.builder.used += Math.round(addedPotionsCount);
+      updatedHistory.potions.builder.timeSavedMinutes += addedMinutes;
     } else if (section === 'lab') {
-      updated.labSecondsSaved += Math.round(addedSecondsSaved);
-      updated.researchPotionsCount += Math.round(addedPotionsCount);
+      updatedHistory.potions.research.used += Math.round(addedPotionsCount);
+      updatedHistory.potions.research.timeSavedMinutes += addedMinutes;
     } else {
-      updated.petSecondsSaved += Math.round(addedSecondsSaved);
-      updated.petPotionsCount += Math.round(addedPotionsCount);
+      updatedHistory.potions.pet.used += Math.round(addedPotionsCount);
+      updatedHistory.potions.pet.timeSavedMinutes += addedMinutes;
     }
 
-    saveMonthlySectionStatsForTag(activePlayerTag, section, updated, currentMonthKey);
-    setMonthlyStats(updated);
+    saveVillageMonthlyHistory(updatedHistory, activePlayerTag, currentMonthKey);
+    setMonthlyHistory(updatedHistory);
+
+    // 2. Keep legacy clash_stats_* synced as well
+    const updatedStats: MonthlySectionStats = {
+      builderPotionsCount: updatedHistory.potions.builder.used,
+      builderSecondsSaved: updatedHistory.potions.builder.timeSavedMinutes * 60,
+      researchPotionsCount: updatedHistory.potions.research.used,
+      labSecondsSaved: updatedHistory.potions.research.timeSavedMinutes * 60,
+      petPotionsCount: updatedHistory.potions.pet.used,
+      petSecondsSaved: updatedHistory.potions.pet.timeSavedMinutes * 60,
+    };
+
+    if (activePlayerTag) {
+      saveMonthlySectionStatsForTag(activePlayerTag, section, updatedStats, currentMonthKey);
+    }
+    setMonthlyStats(updatedStats);
   };
 
   const discardUnconfirmedTimerEdits = useCallback(() => {
@@ -5763,14 +6521,120 @@ export default function App() {
     }
 
     // Automatically reverse-calculate & credit active potion boosts from imported JSON into monthly stats
-    // with duplicate session / re-import protection (`lastImportedBoostState_{playerTag}`)
+    // AND compare newly imported item levels against village_history_YYYY_MM to track completed upgrades
     const existingBoundTag = !isAddingNewAccount
       ? accounts.find((a) => a.id === activeAccountId)?.tag?.trim()
       : undefined;
     const resolvedImportPlayerTag = (extractedTag || existingBoundTag || '').trim().toUpperCase();
+    const currentMonthKey = getCurrentYearMonthKey(new Date(importNow));
+
+    const currentHistory = loadVillageMonthlyHistory(resolvedImportPlayerTag, currentMonthKey);
+    const nextHistoryUpgrades: Record<string, VillageHistoryUpgradeEntry> = {
+      ...currentHistory.upgrades,
+    };
+    const baselineLevels = loadVillageBaselineLevels(resolvedImportPlayerTag, currentMonthKey);
+
+    // Map previously active upgrades in the app before this import so we also catch upgrades that just finished
+    const previousActiveUpgradesById: Record<string, number> = {};
+    if (!isAddingNewAccount) {
+      for (const prevB of builders) {
+        if (prevB.rawId && typeof prevB.upgradeLevel === 'number' && prevB.upgradeLevel > 0) {
+          const prevMin = previousActiveUpgradesById[prevB.rawId];
+          if (prevMin === undefined || prevB.upgradeLevel < prevMin) {
+            previousActiveUpgradesById[prevB.rawId] = prevB.upgradeLevel;
+          }
+        }
+      }
+      for (const prevLocked of lockedResults) {
+        if (
+          prevLocked.rawId &&
+          typeof prevLocked.upgradeLevel === 'number' &&
+          prevLocked.upgradeLevel > 0
+        ) {
+          const prevMin = previousActiveUpgradesById[prevLocked.rawId];
+          if (prevMin === undefined || prevLocked.upgradeLevel < prevMin) {
+            previousActiveUpgradesById[prevLocked.rawId] = prevLocked.upgradeLevel;
+          }
+        }
+      }
+      if (labTimer.rawId && typeof labTimer.upgradeLevel === 'number' && labTimer.upgradeLevel > 0) {
+        previousActiveUpgradesById[labTimer.rawId] = labTimer.upgradeLevel;
+      }
+      if (
+        goblinLabTimer.rawId &&
+        typeof goblinLabTimer.upgradeLevel === 'number' &&
+        goblinLabTimer.upgradeLevel > 0
+      ) {
+        previousActiveUpgradesById[goblinLabTimer.rawId] = goblinLabTimer.upgradeLevel;
+      }
+      if (petTimer.rawId && typeof petTimer.upgradeLevel === 'number' && petTimer.upgradeLevel > 0) {
+        previousActiveUpgradesById[petTimer.rawId] = petTimer.upgradeLevel;
+      }
+    }
+
+    // Collect highest observed level per item ID across all imported village arrays
+    const allImportedVillageItems: RawCoCItem[] = [
+      ...homeItems,
+      ...labItems,
+      ...petItems,
+      ...rawHelpers,
+    ];
+    const importedMaxLevelById: Record<string, number> = {};
+    for (const rawItem of allImportedVillageItems) {
+      if (!rawItem) continue;
+      const itemId = String(rawItem.data ?? rawItem.id ?? '').trim();
+      const itemLvl =
+        typeof rawItem.lvl === 'number' && Number.isFinite(rawItem.lvl)
+          ? Math.floor(rawItem.lvl)
+          : 0;
+      if (!itemId || itemLvl <= 0) continue;
+      if (importedMaxLevelById[itemId] === undefined || itemLvl > importedMaxLevelById[itemId]) {
+        importedMaxLevelById[itemId] = itemLvl;
+      }
+    }
+
+    // Compare newly imported levels against existing village_history.upgrades, baselineLevels, and previous active timers
+    for (const [itemId, newLevel] of Object.entries(importedMaxLevelById)) {
+      const resolvedItemName = resolveUpgradeName(itemId, `Item ${itemId}`);
+      const existingUpgradeEntry = nextHistoryUpgrades[itemId];
+      const prevBaselineLvl = baselineLevels[itemId];
+      const prevActiveUpgradeLvl = previousActiveUpgradesById[itemId];
+
+      if (existingUpgradeEntry) {
+        if (newLevel > existingUpgradeEntry.currentLevel) {
+          nextHistoryUpgrades[itemId] = {
+            name: resolvedItemName,
+            startLevel: existingUpgradeEntry.startLevel,
+            currentLevel: newLevel,
+          };
+        }
+      } else if (typeof prevBaselineLvl === 'number' && newLevel > prevBaselineLvl) {
+        nextHistoryUpgrades[itemId] = {
+          name: resolvedItemName,
+          startLevel: prevBaselineLvl,
+          currentLevel: newLevel,
+        };
+      } else if (typeof prevActiveUpgradeLvl === 'number' && newLevel > prevActiveUpgradeLvl) {
+        nextHistoryUpgrades[itemId] = {
+          name: resolvedItemName,
+          startLevel: prevActiveUpgradeLvl,
+          currentLevel: newLevel,
+        };
+      }
+
+      baselineLevels[itemId] =
+        typeof prevBaselineLvl === 'number' ? Math.max(prevBaselineLvl, newLevel) : newLevel;
+    }
+
+    saveVillageBaselineLevels(baselineLevels, resolvedImportPlayerTag, currentMonthKey);
+
+    const nextHistoryPotions = {
+      builder: { ...currentHistory.potions.builder },
+      research: { ...currentHistory.potions.research },
+      pet: { ...currentHistory.potions.pet },
+    };
 
     if (resolvedImportPlayerTag) {
-      const currentMonthKey = getCurrentYearMonthKey(new Date(importNow));
       const prevBoostTrack = loadLastImportedBoostState(resolvedImportPlayerTag);
       const updatedMonthlyStats = loadMonthlyStatsForTag(resolvedImportPlayerTag, currentMonthKey);
 
@@ -5790,6 +6654,14 @@ export default function App() {
           builderTrackRes.potionsToCredit * activeBuildersForBoostStats * 9 * 3600;
         updatedMonthlyStats.builderPotionsCount += builderTrackRes.potionsToCredit;
         updatedMonthlyStats.builderSecondsSaved += builderSecondsSavedToAdd;
+        nextHistoryPotions.builder.used = Math.max(
+          nextHistoryPotions.builder.used + builderTrackRes.potionsToCredit,
+          updatedMonthlyStats.builderPotionsCount
+        );
+        nextHistoryPotions.builder.timeSavedMinutes = Math.max(
+          nextHistoryPotions.builder.timeSavedMinutes + Math.round(builderSecondsSavedToAdd / 60),
+          Math.round(updatedMonthlyStats.builderSecondsSaved / 60)
+        );
         saveMonthlySectionStatsForTag(
           resolvedImportPlayerTag,
           'builders',
@@ -5810,6 +6682,14 @@ export default function App() {
         const labSecondsSavedToAdd = labTrackRes.potionsToCredit * 23 * 3600;
         updatedMonthlyStats.researchPotionsCount += labTrackRes.potionsToCredit;
         updatedMonthlyStats.labSecondsSaved += labSecondsSavedToAdd;
+        nextHistoryPotions.research.used = Math.max(
+          nextHistoryPotions.research.used + labTrackRes.potionsToCredit,
+          updatedMonthlyStats.researchPotionsCount
+        );
+        nextHistoryPotions.research.timeSavedMinutes = Math.max(
+          nextHistoryPotions.research.timeSavedMinutes + Math.round(labSecondsSavedToAdd / 60),
+          Math.round(updatedMonthlyStats.labSecondsSaved / 60)
+        );
         saveMonthlySectionStatsForTag(
           resolvedImportPlayerTag,
           'lab',
@@ -5830,6 +6710,14 @@ export default function App() {
         const petSecondsSavedToAdd = petTrackRes.potionsToCredit * 23 * 3600;
         updatedMonthlyStats.petPotionsCount += petTrackRes.potionsToCredit;
         updatedMonthlyStats.petSecondsSaved += petSecondsSavedToAdd;
+        nextHistoryPotions.pet.used = Math.max(
+          nextHistoryPotions.pet.used + petTrackRes.potionsToCredit,
+          updatedMonthlyStats.petPotionsCount
+        );
+        nextHistoryPotions.pet.timeSavedMinutes = Math.max(
+          nextHistoryPotions.pet.timeSavedMinutes + Math.round(petSecondsSavedToAdd / 60),
+          Math.round(updatedMonthlyStats.petSecondsSaved / 60)
+        );
         saveMonthlySectionStatsForTag(
           resolvedImportPlayerTag,
           'pethouse',
@@ -5843,10 +6731,22 @@ export default function App() {
         ...(labTrackRes.nextEntry ? { lab: labTrackRes.nextEntry } : {}),
         ...(petTrackRes.nextEntry ? { pet: petTrackRes.nextEntry } : {}),
       });
-
-      // Immediately refresh UI monthly stats state for the active/imported account
-      setMonthlyStats(updatedMonthlyStats);
     }
+
+    const updatedHistoryObj: VillageMonthlyHistory = {
+      potions: nextHistoryPotions,
+      upgrades: nextHistoryUpgrades,
+    };
+    saveVillageMonthlyHistory(updatedHistoryObj, resolvedImportPlayerTag, currentMonthKey);
+    setMonthlyHistory(updatedHistoryObj);
+    setMonthlyStats({
+      builderPotionsCount: updatedHistoryObj.potions.builder.used,
+      builderSecondsSaved: updatedHistoryObj.potions.builder.timeSavedMinutes * 60,
+      researchPotionsCount: updatedHistoryObj.potions.research.used,
+      labSecondsSaved: updatedHistoryObj.potions.research.timeSavedMinutes * 60,
+      petPotionsCount: updatedHistoryObj.potions.pet.used,
+      petSecondsSaved: updatedHistoryObj.potions.pet.timeSavedMinutes * 60,
+    });
 
     setCurrentMode('multi');
     setNumBuilders(nextBuilderSliderCount);
@@ -6068,14 +6968,85 @@ export default function App() {
     })
     .filter((item): item is NonNullable<typeof item> => item !== null);
 
+  // Pure UI-layer expansion states for the Clash Ledger cards
+  const [isVillageSwitcherOpen, setIsVillageSwitcherOpen] = useState<boolean>(false);
+  const [isBoostDrawerOpen, setIsBoostDrawerOpen] = useState<boolean>(false);
+  const [queueFilter, setQueueFilter] = useState<'all' | 'builders' | 'lab_pets'>('all');
+
+  // Resolve Town Hall level for the Hero Header Card 3D render
+  const resolvedThLevel = (() => {
+    if (typeof thLevel === 'number' && thLevel >= 1 && thLevel <= 18) {
+      return thLevel;
+    }
+    const thUpgradeInResults = displayedBuilderResults.find(
+      (r) => r.rawId === '1000001' || r.upgradeTitle?.toLowerCase() === 'town hall'
+    );
+    if (thUpgradeInResults?.upgradeLevel) {
+      return Math.min(18, Math.max(1, thUpgradeInResults.upgradeLevel));
+    }
+    const nameMatch = activeAccountProfile?.name?.match(/TH\s*(\d{1,2})/i);
+    if (nameMatch) {
+      const parsed = parseInt(nameMatch[1], 10);
+      if (parsed >= 1 && parsed <= 18) return parsed;
+    }
+    return 17;
+  })();
+
+  const busyRegularBuildersCount = displayedBuilderResults.filter(
+    (r) => !r.isGoblin && r.targetTimestamp > nowTick
+  ).length;
+  const regularBuildersCap =
+    currentMode === 'single' ? 1 : Math.min(6, Math.max(1, numBuilders));
+  const isGoblinBuilderBusy = displayedBuilderResults.some(
+    (r) => r.isGoblin && r.targetTimestamp > nowTick
+  );
+  const soonestBuilderItem =
+    displayedBuilderResults
+      .filter((r) => r.targetTimestamp > nowTick)
+      .sort((a, b) => a.targetTimestamp - b.targetTimestamp)[0] ||
+    displayedBuilderResults[0] ||
+    null;
+
+  const activeLabQueueCount =
+    (targetLabTimestamp ? 1 : 0) + (targetGoblinLabTimestamp ? 1 : 0);
+  const activePetQueueCount = targetPetTimestamp ? 1 : 0;
+
+  const activeBoostTags: string[] = [];
+  if (builderBoostRemSec > 0) activeBoostTags.push('Builder 10x');
+  if (labBoostRemSec > 0) activeBoostTags.push('Research 24x');
+  if (petBoostRemSec > 0) activeBoostTags.push('Pet 24x');
+  if (isBuilderHelperWorking) {
+    activeBoostTags.push(`Builder Apprentice ${getHelperSpeedMultiplier(builderApprentice.level)}x`);
+  }
+  if (isLabHelperWorking) {
+    activeBoostTags.push(`Lab Apprentice ${getHelperSpeedMultiplier(labApprentice.level)}x`);
+  }
+
+  const boostHeadlineStatus =
+    activeBoostTags.length > 0 ? activeBoostTags.join(' · ') : 'No active boosts';
+
+  const boostSublineStatus = (() => {
+    if (builderHelperTargetName) {
+      return `${builderHelperTargetName} · Apprentice · ${
+        builderApprentice.recurrent !== false ? 'repeat forecast on' : 'repeat forecast off'
+      }`;
+    }
+    if (labHelperTargetName) {
+      return `${labHelperTargetName} · Lab Apprentice · ${
+        labApprentice.recurrent !== false ? 'repeat forecast on' : 'repeat forecast off'
+      }`;
+    }
+    return 'Builder & Lab Apprentices · tap + to configure';
+  })();
+
   return (
-    <div className="min-h-dvh w-full flex flex-col items-center justify-center p-3 sm:p-6 overflow-y-auto overflow-x-hidden">
+    <div className="min-h-dvh w-full bg-[#0B0E14] text-white flex flex-col items-center justify-start px-3.5 sm:px-5 pt-4 pb-12 overflow-y-auto overflow-x-hidden select-none">
       {/* Toast Notification */}
       {toast && (
         <div
           className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl font-extrabold text-xs sm:text-sm shadow-2xl border flex items-center gap-2 transition-all ${
             toast.type === 'success'
-              ? 'bg-emerald-950/95 text-[#22c55e] border-emerald-400/50 shadow-emerald-500/20'
+              ? 'bg-emerald-950/95 text-[#4ADE80] border-emerald-400/50 shadow-emerald-500/20'
               : 'bg-rose-950/95 text-rose-300 border-rose-400/50 shadow-rose-500/20'
           }`}
         >
@@ -6084,31 +7055,60 @@ export default function App() {
         </div>
       )}
 
-      <div className="glass-card w-full max-w-md rounded-3xl p-5 sm:p-7 relative overflow-hidden my-auto">
-        {/* Decorative glowing orbs behind the content */}
-        <div className="absolute -top-10 -right-10 w-32 h-32 bg-pink-500 rounded-full mix-blend-screen filter blur-[50px] opacity-40 pointer-events-none"></div>
-        <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-yellow-500 rounded-full mix-blend-screen filter blur-[50px] opacity-30 pointer-events-none"></div>
+      <div className="w-full max-w-md space-y-4">
+        {/* =============================================================== */}
+        {/* TOP NATIVE APP BAR (AVATAR + TITLE + STATS & BACKUP ACTIONS)    */}
+        {/* =============================================================== */}
+        <header className="flex items-center justify-between gap-3 pt-1">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-11 h-11 rounded-2xl bg-[#161B26] border border-[#2A303C] p-1 flex items-center justify-center shrink-0 overflow-hidden shadow-md">
+              <img
+                src="/icons/art_28000001.webp"
+                alt="Clash Companion"
+                className="w-full h-full object-contain"
+                onError={(e) => {
+                  (e.currentTarget as HTMLImageElement).src = '/icons/art_1000001.webp';
+                }}
+              />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-lg sm:text-xl font-black tracking-tight text-white uppercase leading-none truncate">
+                CLASH PLANNER
+              </h1>
+              <p className="text-[10px] font-bold tracking-[0.18em] text-[#8E9AA8] uppercase mt-1 truncate">
+                YOUR VILLAGE COMPANION
+              </p>
+            </div>
+          </div>
 
-        {/* 1. BRANDING & HEADER UPDATE */}
-        <div className="text-center mb-4 relative z-10">
-          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-wide">
-            <span className="text-white">Clash</span>{' '}
-            <span className="text-planner-gradient">Planner</span>
-          </h1>
-          <p className="tagline-companion mt-1 uppercase">UPGRADE COMPANION</p>
-
-          <div className="mt-3.5 flex items-center justify-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Monthly Time Saved Summary Button */}
             <button
               type="button"
               onClick={() => {
                 triggerHaptic(15);
-                setIsAddingNewAccount(false);
-                setIsImportModalOpen(true);
+                setSummaryModalSection('builders');
               }}
-              className="tactile inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-extrabold text-[#f8fafc] bg-gradient-to-r from-amber-500/20 via-pink-500/20 to-purple-500/20 hover:from-amber-500/30 hover:to-purple-500/30 border border-amber-400/50 shadow-[0_0_15px_rgba(251,191,36,0.25)] cursor-pointer"
+              title="Monthly Potion & Time Saved Summary"
+              className="tactile w-11 h-11 rounded-2xl bg-[#161B26] hover:bg-[#1E2534] border border-[#2A303C] flex items-center justify-center text-[#F3CA65] cursor-pointer shadow-sm"
             >
-              <span>📥 Import CoC JSON</span>
+              <svg
+                className="w-5 h-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                <rect x="14" y="14" width="7" height="7" rx="1.5" />
+              </svg>
             </button>
+
+            {/* Full Backup / Restore Modal Button */}
             <button
               type="button"
               onClick={() => {
@@ -6117,990 +7117,1119 @@ export default function App() {
                 setIsBackupModalOpen(true);
               }}
               title="Backup or Restore all village accounts and timers"
-              className="tactile inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-extrabold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/40 shadow-[0_0_12px_rgba(16,185,129,0.18)] cursor-pointer"
+              className="tactile w-11 h-11 rounded-2xl bg-[#161B26] hover:bg-[#1E2534] border border-[#2A303C] flex items-center justify-center text-[#F3CA65] cursor-pointer shadow-sm"
             >
-              <span>💾 Backup / Restore</span>
+              <svg
+                className="w-5 h-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
             </button>
+          </div>
+        </header>
+
+        {/* Subheader Status Row: VILLAGE OVERVIEW + ON DEVICE */}
+        <div className="flex items-center justify-between px-0.5 pt-1">
+          <span className="text-[11px] font-bold tracking-[0.16em] text-[#8E9AA8] uppercase">
+            VILLAGE OVERVIEW
+          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-[#4ADE80] shadow-[0_0_8px_#4ADE80]" />
+            <span className="text-[11px] font-bold tracking-[0.14em] text-[#4ADE80] uppercase">
+              ON DEVICE
+            </span>
           </div>
         </div>
 
-        {/* 2. MULTI-ACCOUNT PROFILE SWITCHER (WITH ISOLATED PENCIL HIT ZONE) */}
-        <div className="bg-black/45 border border-white/10 rounded-2xl p-2 mb-3.5 relative z-10">
-          <div className="account-bar-scroll flex items-center gap-2 overflow-x-auto">
-            {accounts.map((account) => {
-              const isActive = account.id === activeAccountId;
-              return (
-                <div
-                  key={account.id}
-                  onClick={() => handleAccountChipClick(account)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      handleAccountChipClick(account);
-                    }
-                  }}
-                  title={isActive ? `${account.name} (Active)` : `Switch to ${account.name}`}
-                  className={`tactile shrink-0 px-4 py-2 min-h-[38px] rounded-xl text-xs font-extrabold flex items-center gap-2 transition-all cursor-pointer select-none ${
-                    isActive ? 'account-chip-active' : 'account-chip-inactive'
-                  }`}
-                >
-                  {isActive && (
-                    <span
-                      className="w-2 h-2 rounded-full bg-[#22c55e] shadow-[0_0_6px_#22c55e] inline-block shrink-0"
-                      aria-hidden="true"
-                    />
-                  )}
-                  <span className="py-0.5">{account.name}</span>
+        {/* =============================================================== */}
+        {/* A. HERO HEADER CARD (TOWN HALL 3D RENDER + IMPORT + SWITCHER)   */}
+        {/* =============================================================== */}
+        <section className="ledger-hero-card rounded-3xl p-5 relative overflow-hidden">
+          <div className="flex items-center justify-between gap-3">
+            {/* Left Column: Town Hall Level, Player Tag & Village Name, Last Synced */}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-extrabold tracking-[0.15em] text-[#F3CA65] uppercase">
+                  HOME VILLAGE
+                </span>
+                {activeAccountProfile && (
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleOpenRenameModal(account, e);
-                    }}
-                    aria-label={`Edit ${account.name}`}
-                    title={`Edit ${account.name}`}
-                    className={`ml-[8px] p-[4px] rounded-md hover:bg-white/15 active:bg-white/25 transition text-[11px] leading-none flex items-center justify-center cursor-pointer ${
-                      isActive ? 'text-[#fbbf24] opacity-95' : 'text-slate-400 opacity-75'
-                    }`}
+                    onClick={(e) => handleOpenRenameModal(activeAccountProfile, e)}
+                    title={`Rename or manage ${activeAccountProfile.name}`}
+                    className="tactile inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-bold text-[#8E9AA8] hover:text-[#F3CA65] cursor-pointer"
                   >
-                    ✏️
+                    <span className="truncate max-w-[110px]">{activeAccountProfile.name}</span>
+                    <span>✏️</span>
                   </button>
-                </div>
-              );
-            })}
-
-            {/* Add Account Button: Dashed Minimalist Chip */}
-            <button
-              type="button"
-              onClick={handleOpenAddVillageModal}
-              className="tactile account-chip-add shrink-0 px-4 py-2 min-h-[38px] rounded-xl text-xs font-bold flex items-center gap-1 transition-all cursor-pointer"
-            >
-              <span>+ Add Village</span>
-            </button>
-          </div>
-        </div>
-
-        {/* 3. SEGMENTED CATEGORY TABS (ZERO-CLUTTER NAVIGATION) */}
-        <div className="grid grid-cols-3 gap-1.5 bg-black/50 p-1.5 rounded-2xl border border-white/10 mb-5 relative z-10">
-          <button
-            type="button"
-            onClick={() => handleCategoryTabChange('builders')}
-            className={`tactile py-2.5 px-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold transition-all flex items-center justify-center gap-1 cursor-pointer border ${
-              activeTab === 'builders'
-                ? 'seg-tab-builders-active'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <span>🔨</span>
-            <span className="truncate">Builders (6+1)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleCategoryTabChange('laboratory')}
-            className={`tactile py-2.5 px-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold transition-all flex items-center justify-center gap-1 cursor-pointer border ${
-              activeTab === 'laboratory'
-                ? 'seg-tab-lab-active'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <span>⚗️</span>
-            <span className="truncate">Laboratory</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleCategoryTabChange('pethouse')}
-            className={`tactile py-2.5 px-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold transition-all flex items-center justify-center gap-1 cursor-pointer border ${
-              activeTab === 'pethouse'
-                ? 'seg-tab-pet-active'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <span>🐾</span>
-            <span className="truncate">Pet House</span>
-          </button>
-        </div>
-
-        {/* 4. TAB CONTENT CONTAINERS */}
-        {/* ================================================================= */}
-        {/* TAB 1: BUILDERS (6+1) & HELPERS SUB-TAB                           */}
-        {/* ================================================================= */}
-        {activeTab === 'builders' && (
-          <div key="tab-builders" className="tab-panel-fade relative z-10 space-y-4">
-            {/* Collapsible UPGRADE TIMERS Section (Contains View Selector Tabs, Active Builders, Reset/Edit Actions & Timer Cards) */}
-            <div id="time-inputs-container">
-              <div
-                role="button"
-                tabIndex={0}
-                aria-expanded={!isTimersCollapsed}
-                onClick={handleToggleTimersAccordion}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    handleToggleTimersAccordion();
-                  }
-                }}
-                className="tactile w-full flex items-center justify-between gap-2 py-1.5 px-2.5 -mx-2.5 rounded-xl hover:bg-white/5 transition-colors cursor-pointer select-none"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs uppercase tracking-wider text-[#fbbf24] font-extrabold">
-                    Upgrade Timers
-                  </span>
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold bg-amber-500/15 text-[#fbbf24] border border-amber-400/35 shadow-sm transition-all">
-                    <span className="inline-block transition-transform duration-200">
-                      {isTimersCollapsed ? '▸' : '▾'}
-                    </span>
-                    <span>
-                      {isTimersCollapsed
-                        ? `Show Timers (${activeBuilderTimersCount} Active)`
-                        : 'Hide Timers'}
-                    </span>
-                  </span>
-                </div>
-                {isEditingTimers && !isTimersCollapsed && (
-                  <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-500/20 text-[#fbbf24] border border-amber-400/40 animate-pulse">
-                    Editing
-                  </span>
                 )}
               </div>
 
-              <div
-                className={`grid transition-all duration-300 ease-in-out ${
-                  isTimersCollapsed
-                    ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
-                    : 'grid-rows-[1fr] opacity-100 mt-3.5'
-                }`}
-              >
-                <div className="overflow-hidden space-y-4">
-                  {/* 1. View Selector Capsule Row (Single Builder | All Builders | Helpers) inside Upgrade Timers */}
-                  <div className="flex bg-black/40 rounded-xl p-1 border border-white/10 gap-1">
-                    <button
-                      id="btn-mode-single"
-                      type="button"
-                      onClick={() => setMode('single')}
-                      className={`tactile flex-1 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all cursor-pointer ${
-                        currentMode === 'single'
-                          ? 'bg-white/20 text-white shadow-sm'
-                          : 'text-gray-300 hover:text-white'
-                      }`}
-                    >
-                      Single Builder
-                    </button>
-                    <button
-                      id="btn-mode-multi"
-                      type="button"
-                      onClick={() => setMode('multi')}
-                      className={`tactile flex-1 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all cursor-pointer ${
-                        currentMode === 'multi'
-                          ? 'bg-white/20 text-white shadow-sm'
-                          : 'text-gray-300 hover:text-white'
-                      }`}
-                    >
-                      All Builders
-                    </button>
-                    <button
-                      id="btn-mode-helpers"
-                      type="button"
-                      onClick={() => setMode('helpers')}
-                      className={`tactile flex-1 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                        currentMode === 'helpers'
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 shadow-sm'
-                          : 'text-gray-300 hover:text-white'
-                      }`}
-                    >
-                      {(isBuilderHelperWorking || isLabHelperWorking) && (
-                        <span className="helper-pulse-dot" title="Apprentice Active" />
-                      )}
-                      <span>Helpers</span>
-                    </button>
-                  </div>
+              <h2 className="text-2xl sm:text-[30px] font-black text-white tracking-tight leading-tight mt-1">
+                Town Hall {resolvedThLevel}
+              </h2>
 
-                  {currentMode === 'helpers' ? (
-                    <div key="subtab-helpers" className="tab-panel-fade space-y-4">
-                      <HelperObsidianCard
-                        icon="👷"
-                        title="Builder's Apprentice"
-                        subtitle="Works on Home Village Buildings, Defenses & Heroes (1h Active Session)"
-                        accentVariant="gold"
-                        level={builderApprentice.level}
-                        targetName={builderHelperTargetName}
-                        activeSessionEndTime={builderApprentice.activeSessionEndTime}
-                        cooldownEndTime={builderApprentice.cooldownEndTime}
-                        recurrent={builderApprentice.recurrent}
-                        onChangeLevel={handleChangeBuilderApprenticeLevel}
-                        onOpenAssignModal={() => {
-                          triggerHaptic(15);
-                          setAssignModalType('builder');
-                        }}
-                        onSessionExpire={handleBuilderSessionExpire}
-                        onCooldownExpire={handleBuilderCooldownExpire}
-                      />
+              <p className="text-xs sm:text-[13px] font-bold text-[#CBD5E1] tracking-wide mt-0.5 truncate">
+                {activePlayerTag || '#VILLAGE-LOCAL'}
+              </p>
 
-                      <HelperObsidianCard
-                        icon="🔬"
-                        title="Lab Apprentice"
-                        subtitle="Works on Laboratory Troops, Spells & Siege Machines (1h Active Session)"
-                        accentVariant="lab"
-                        level={labApprentice.level}
-                        targetName={labHelperTargetName}
-                        activeSessionEndTime={labApprentice.activeSessionEndTime}
-                        cooldownEndTime={labApprentice.cooldownEndTime}
-                        recurrent={labApprentice.recurrent}
-                        onChangeLevel={handleChangeLabApprenticeLevel}
-                        onOpenAssignModal={() => {
-                          triggerHaptic(15);
-                          setAssignModalType('lab');
-                        }}
-                        onSessionExpire={handleLabSessionExpire}
-                        onCooldownExpire={handleLabCooldownExpire}
-                      />
-                    </div>
-                  ) : (
-                    <>
-                      {/* 2. Relocated Safe Edit & Reset Action Bar inside Upgrade Timers */}
-                      {!isEditingTimers ? (
-                        <div className="flex items-center justify-between gap-2 bg-black/35 p-2.5 rounded-xl border border-white/10">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              triggerHaptic(15);
-                              setConfirmDialogType('start_edit');
-                            }}
-                            className="tactile flex-1 py-2 px-3 rounded-lg text-xs font-extrabold text-[#fbbf24] bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <span>✏️ Reset / Edit Timers</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              triggerHaptic(15);
-                              setConfirmDialogType('reset_all');
-                            }}
-                            className="tactile py-2 px-3 rounded-lg text-xs font-extrabold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 flex items-center justify-center gap-1.5 cursor-pointer"
-                            title="Reset all active timers and schedules"
-                          >
-                            <span>🗑️ Reset All</span>
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="rounded-xl p-3 bg-amber-950/40 border border-amber-400/45 space-y-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[11px] font-extrabold text-[#fbbf24] uppercase tracking-wider">
-                              ✏️ Editing Timers (Unconfirmed)
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                triggerHaptic(15);
-                                setConfirmDialogType('reset_all');
-                              }}
-                              className="tactile text-[11px] font-bold text-rose-300 hover:text-rose-200 px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 cursor-pointer"
-                            >
-                              Reset All
-                            </button>
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                triggerHaptic(15);
-                                discardUnconfirmedTimerEdits();
-                                showToast('success', 'Reverted to previous locked timers');
-                              }}
-                              className="tactile flex-1 py-2 px-3 rounded-lg text-xs font-bold text-gray-200 bg-white/10 hover:bg-white/15 border border-white/15 cursor-pointer"
-                            >
-                              ✕ Cancel
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                triggerHaptic(15);
-                                setConfirmDialogType('apply_edit');
-                              }}
-                              className="btn-calculate tactile flex-1 py-2 px-3 rounded-lg text-xs font-extrabold text-white shadow-md cursor-pointer"
-                            >
-                              ✓ Apply Changes
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* 3. Active Builders Slider (Merged inside collapsible Upgrade Timers, hidden in single mode) */}
-                      <div
-                        id="multi-builders-config"
-                        className={`${
-                          currentMode === 'single' ? 'hidden' : ''
-                        } bg-black/30 p-3.5 rounded-2xl border border-white/10`}
-                      >
-                        <div className="flex justify-between items-center mb-2.5">
-                          <label className="text-sm text-[#f8fafc] font-bold">
-                            Active Builders
-                          </label>
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => handleBuilderCountChange(numBuilders - 1)}
-                              className="tactile w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-white font-bold flex items-center justify-center cursor-pointer border border-white/10"
-                              aria-label="Decrease builders"
-                            >
-                              −
-                            </button>
-                            <div
-                              className={`font-extrabold bg-black/50 px-3 py-1 rounded-lg shadow-inner border text-xs ${
-                                numBuilders === 7
-                                  ? 'text-[#22c55e] border-emerald-500/40'
-                                  : 'text-[#fbbf24] border-amber-400/20'
-                              }`}
-                            >
-                              <span id="builders-count-label">{numBuilders}</span>{' '}
-                              {numBuilders === 7 ? '👺' : '👷'}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => handleBuilderCountChange(numBuilders + 1)}
-                              className="tactile w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-white font-bold flex items-center justify-center cursor-pointer border border-white/10"
-                              aria-label="Increase builders"
-                            >
-                              +
-                            </button>
-                          </div>
-                        </div>
-                        <input
-                          type="range"
-                          id="input-builders"
-                          min="1"
-                          max="7"
-                          value={numBuilders}
-                          onChange={(e) => handleBuilderCountChange(parseInt(e.target.value, 10))}
-                          className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-[#EC4899]"
-                        />
-                        <div className="flex justify-between text-[11px] font-semibold text-gray-300 mt-2 px-0.5">
-                          <span>1 Builder</span>
-                          <span>6 Builders</span>
-                          <span
-                            className={
-                              numBuilders === 7 ? 'text-[#22c55e] font-bold' : 'text-emerald-400/80'
-                            }
-                          >
-                            7: Goblin 👺
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* 4. Individual Builder Input Cards */}
-                      {Array.from({ length: activeBuildersToRender }, (_, idx) => {
-                        const i = idx + 1;
-                        const isGoblin = currentMode === 'multi' && i === 7;
-                        const builderVal = builders[idx] || { d: '', h: '', m: '' };
-                        const isHero = !isGoblin && !!builderVal.rawId?.startsWith('28');
-
-                        const slotBadgeText = isGoblin ? '[GOBLIN]' : `[B${i}]`;
-                        const defaultTitle =
-                          currentMode === 'single'
-                            ? 'Remaining Time'
-                            : isGoblin
-                            ? 'Goblin Builder'
-                            : `Builder ${i}`;
-                        const displayTitle = builderVal.upgradeTitle || defaultTitle;
-
-                        const accentClass = isGoblin
-                          ? 'goblin-card accent-goblin'
-                          : isHero
-                          ? 'builder-card accent-hero'
-                          : 'builder-card accent-gold';
-
-                        const badgeClass = isGoblin
-                          ? 'slot-badge-goblin'
-                          : isHero
-                          ? 'slot-badge-hero'
-                          : 'slot-badge-regular';
-
-                        const hasThisBuilderTime = !!(
-                          builderVal.d ||
-                          builderVal.h ||
-                          builderVal.m ||
-                          builderVal.upgradeTitle
-                        );
-
-                        const isApprenticeActiveHere =
-                          isBuilderHelperWorking && builderApprentice.assignedSlot === idx;
-
-                        return (
-                          <div key={i} className={`rounded-2xl p-4 ${accentClass}`}>
-                            <div className="builder-header-sep flex flex-wrap justify-between items-center gap-2">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className={badgeClass}>{slotBadgeText}</span>
-                                <span className="upgrade-title">{displayTitle}</span>
-                                {typeof builderVal.upgradeLevel === 'number' && (
-                                  <span className={isGoblin ? 'lvl-chip-goblin' : 'lvl-chip'}>
-                                    LVL {builderVal.upgradeLevel} → LVL{' '}
-                                    {builderVal.upgradeLevel + 1}
-                                  </span>
-                                )}
-                                {isApprenticeActiveHere && (
-                                  <span
-                                    className="helper-pulse-dot"
-                                    title="Apprentice Active"
-                                  ></span>
-                                )}
-                              </div>
-
-                              {hasThisBuilderTime && (
-                                <button
-                                  type="button"
-                                  onClick={() => resetBuilderTime(idx)}
-                                  className="tactile text-xs font-bold text-gray-200 hover:text-elixir transition flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/10 hover:bg-white/15 cursor-pointer"
-                                  title="Clear this builder's time"
-                                >
-                                  ✕ Clear
-                                </button>
-                              )}
-                            </div>
-
-                            <div className="grid grid-cols-3 gap-3">
-                              <div className="flex flex-col">
-                                <input
-                                  type="number"
-                                  id={`input-d-${i}`}
-                                  inputMode="numeric"
-                                  value={builderVal.d}
-                                  onChange={(e) =>
-                                    handleBuilderTimeChange(idx, 'd', e.target.value)
-                                  }
-                                  placeholder="0"
-                                  min="0"
-                                  max="999"
-                                  className={`glass-input ${
-                                    isGoblin ? 'goblin-input' : ''
-                                  } w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500`}
-                                />
-                                <span className="text-xs font-semibold text-gray-200 text-center mt-1">
-                                  Days
-                                </span>
-                              </div>
-                              <div className="flex flex-col">
-                                <input
-                                  type="number"
-                                  id={`input-h-${i}`}
-                                  inputMode="numeric"
-                                  value={builderVal.h}
-                                  onChange={(e) =>
-                                    handleBuilderTimeChange(idx, 'h', e.target.value)
-                                  }
-                                  placeholder="0"
-                                  min="0"
-                                  max="24"
-                                  className={`glass-input ${
-                                    isGoblin ? 'goblin-input' : ''
-                                  } w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500`}
-                                />
-                                <span className="text-xs font-semibold text-gray-200 text-center mt-1">
-                                  Hours
-                                </span>
-                              </div>
-                              <div className="flex flex-col">
-                                <input
-                                  type="number"
-                                  id={`input-m-${i}`}
-                                  inputMode="numeric"
-                                  value={builderVal.m}
-                                  onChange={(e) =>
-                                    handleBuilderTimeChange(idx, 'm', e.target.value)
-                                  }
-                                  placeholder="0"
-                                  min="0"
-                                  max="60"
-                                  className={`glass-input ${
-                                    isGoblin ? 'goblin-input' : ''
-                                  } w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500`}
-                                />
-                                <span className="text-xs font-semibold text-gray-200 text-center mt-1">
-                                  Mins
-                                </span>
-                              </div>
-                            </div>
-
-                            <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-2.5 border-t border-white/10">
-                              {[
-                                { label: '+6h', d: 0, h: 6 },
-                                { label: '+12h', d: 0, h: 12 },
-                                { label: '+1d', d: 1, h: 0 },
-                                { label: '+3d', d: 3, h: 0 },
-                                { label: '+5d', d: 5, h: 0 },
-                                { label: '+7d', d: 7, h: 0 },
-                              ].map((preset) => (
-                                <button
-                                  key={preset.label}
-                                  type="button"
-                                  onClick={() => applyPresetToBuilder(idx, preset.d, preset.h)}
-                                  className={`tactile text-xs font-bold px-2.5 py-1 rounded-lg border cursor-pointer ${
-                                    isGoblin
-                                      ? 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 border-emerald-500/30'
-                                      : 'bg-white/10 hover:bg-white/20 text-[#f8fafc] border-white/15'
-                                  }`}
-                                >
-                                  {preset.label}
-                                </button>
-                              ))}
-                              <button
-                                type="button"
-                                onClick={() => resetBuilderTime(idx)}
-                                className="tactile text-xs font-bold px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 ml-auto cursor-pointer"
-                              >
-                                Clear
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </>
-                  )}
-                </div>
-              </div>
+              <p className="text-[11px] sm:text-xs font-medium text-[#8E9AA8] mt-2 truncate">
+                Export · {lastSynced || 'Synced on device'}
+              </p>
             </div>
 
-            {/* 2. COMPACT BUILDER POTIONS CARD + INLINE CONDITIONAL CONFIRM BUTTON */}
-            <div className="builder-card accent-gold rounded-2xl p-3.5">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-extrabold uppercase tracking-wider text-[#fbbf24]">
-                  🧪 Builder Potions Used
-                </span>
-                <div className="flex items-center gap-1.5">
-                  {pendingBuilderPotions > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        triggerHaptic(15);
-                        setPotionsInput('0');
-                      }}
-                      className="tactile text-[11px] font-bold text-gray-300 hover:text-elixir transition cursor-pointer bg-white/10 px-2 py-0.5 rounded-md"
-                    >
-                      Clear
-                    </button>
-                  )}
-                  <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-500/20 text-[#fbbf24] border border-amber-400/40">
-                    10x Speed Boost
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between gap-2 bg-black/40 rounded-xl p-1.5 border border-white/10">
-                <button
-                  type="button"
-                  onClick={() => adjustPotions(-1)}
-                  className="tactile w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white font-extrabold text-lg flex items-center justify-center border border-white/15 cursor-pointer shrink-0"
-                  aria-label="Decrease potions"
-                >
-                  −
-                </button>
-                <div className="text-center flex-1 min-w-0">
-                  <div className="text-sm font-extrabold text-[#f8fafc] leading-tight">
-                    {pendingBuilderPotions}{' '}
-                    {pendingBuilderPotions === 1 ? 'Builder Potion' : 'Builder Potions'}
-                  </div>
-                  <div className="text-[10px] font-bold text-amber-300/90 leading-tight mt-0.5">
-                    10x Speed Boost (Saves 9h per potion)
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => adjustPotions(1)}
-                  className="tactile w-9 h-9 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-[#fbbf24] font-extrabold text-lg flex items-center justify-center border border-amber-400/40 cursor-pointer shrink-0"
-                  aria-label="Increase potions"
-                >
-                  +
-                </button>
-              </div>
-
-              {/* Conditional Inline Confirm Action Button (Visible ONLY when potion count > 0) */}
-              {pendingBuilderPotions > 0 && (
-                <button
-                  type="button"
-                  onClick={handleBuilderPrimaryAction}
-                  className="tactile mt-2.5 w-full font-extrabold text-xs sm:text-sm rounded-xl py-2.5 px-3 tracking-wide cursor-pointer transition-all bg-gradient-to-r from-amber-500 via-pink-500 to-amber-500 text-white border border-amber-300/60 shadow-[0_0_20px_rgba(251,191,36,0.35)] flex items-center justify-center gap-1.5"
-                >
-                  <span>
-                    ⚡ Confirm & Activate Boost ({pendingBuilderPotions}{' '}
-                    {pendingBuilderPotions === 1 ? 'Potion' : 'Potions'})
-                  </span>
-                </button>
-              )}
-
-              {/* Active Builder Boost Live Countdown Badge */}
-              <ActiveBoostHudBadge
-                boostEndTime={builderBoostEndTime}
-                variant="builders"
-                onExpire={handleBuilderBoostExpire}
+            {/* Right Column: Large 3D Render of Town Hall */}
+            <div className="w-24 h-24 sm:w-28 sm:h-28 shrink-0 flex items-center justify-center relative">
+              <img
+                src={getTownHallIconSrc(resolvedThLevel)}
+                alt={`Town Hall ${resolvedThLevel}`}
+                onError={(e) => {
+                  (e.currentTarget as HTMLImageElement).src = '/icons/art_1000001.webp';
+                }}
+                className="w-full h-full object-contain select-none pointer-events-none drop-shadow-[0_10px_20px_rgba(0,0,0,0.65)]"
               />
             </div>
+          </div>
 
-            {/* Results Section (Animated + Locked Target Finish Timestamp + 4-Unit HUD Live Ticker) */}
-            <div
-              key={animKey}
-              id="results-container"
-              className={`${
-                shouldShowBuilderResults ? 'show-result' : 'hidden-result'
-              } pt-3 border-t border-white/15`}
-            >
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={`h-2 w-2 rounded-full animate-pulse ${
-                      pendingBuilderPotions > 0 ? 'bg-[#fbbf24]' : 'bg-[#22c55e]'
-                    }`}
-                  />
-                  <span className="text-xs font-extrabold uppercase tracking-wider text-[#f8fafc]">
-                    {pendingBuilderPotions > 0
-                      ? `Preview Finish Schedule (${pendingBuilderPotions} ${
-                          pendingBuilderPotions === 1 ? 'Potion' : 'Potions'
-                        })`
-                      : 'Locked Finish Schedule'}
-                  </span>
-                </div>
-              </div>
-
-              <div id="results-content" className="space-y-3">
-                {displayedBuilderResults.map((item, idx) => {
-                  const previewMatch = builderPreview?.computedResults.find(
-                    (p) => p.builderIndex === item.builderIndex
-                  );
-                  const displayDate =
-                    pendingBuilderPotions > 0 && previewMatch
-                      ? previewMatch.formattedDate
-                      : item.formattedDate;
-                  const isFinishingNext =
-                    displayedBuilderResults.length > 1 &&
-                    soonestTargetTimestamp !== null &&
-                    item.targetTimestamp === soonestTargetTimestamp;
-                  const isHero = !item.isGoblin && !!item.rawId?.startsWith('28');
-
-                  const cardAccentClass = item.isGoblin
-                    ? 'goblin-card accent-goblin'
-                    : isHero
-                    ? 'bg-black/40 border-white/10 accent-hero'
-                    : 'bg-black/40 border-white/10 accent-gold';
-
-                  const badgeClass = item.isGoblin
-                    ? 'slot-badge-goblin'
-                    : isHero
-                    ? 'slot-badge-hero'
-                    : 'slot-badge-regular';
-
-                  const isHelperAssignedHere =
-                    builderApprentice.assignedSlot === item.builderIndex;
-                  const isApprenticeActiveHere =
-                    isBuilderHelperWorking && isHelperAssignedHere;
-
-                  return (
-                    <div
-                      key={`${item.builderIndex}-${item.targetTimestamp}-${idx}`}
-                      className={`rounded-2xl p-4 border flex flex-col ${cardAccentClass}`}
-                    >
-                      {/* Minimalist Poppy Header inside Result Card */}
-                      <div className="builder-header-sep flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className={badgeClass}>{item.slotBadge}</span>
-                          <span className="upgrade-title">{item.upgradeTitle}</span>
-                          {typeof item.upgradeLevel === 'number' && (
-                            <span className={item.isGoblin ? 'lvl-chip-goblin' : 'lvl-chip'}>
-                              LVL {item.upgradeLevel} → LVL {item.upgradeLevel + 1}
-                            </span>
-                          )}
-                          {isApprenticeActiveHere && (
-                            <span
-                              className="helper-pulse-dot"
-                              title="Apprentice Active"
-                            ></span>
-                          )}
-                        </div>
-                        {isFinishingNext && (
-                          <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-500/20 text-[#fbbf24] border border-amber-400/40">
-                            NEXT FREE
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-baseline gap-2 mb-3">
-                        <span className="text-[10px] uppercase tracking-wider text-gray-300 font-bold">
-                          {pendingBuilderPotions > 0 ? 'Preview Completes On:' : 'Completes On:'}
-                        </span>
-                        <span className="text-base font-extrabold text-gold">
-                          {displayDate}
-                        </span>
-                      </div>
-
-                      {/* 4-Unit HUD Live Ticker inside the card */}
-                      <div className="pt-2.5 border-t border-white/10">
-                        <LiveHudTicker
-                          targetTimestamp={item.targetTimestamp}
-                          helper={builderApprentice}
-                          isHelperAssignedToSlot={isHelperAssignedHere}
-                          helperIcon="👷"
-                          helperBoostEndTime={
-                            isApprenticeActiveHere
-                              ? builderHelperCycleNow.activeRemSec > 0
-                                ? nowTick + builderHelperCycleNow.activeRemSec * 1000
-                                : builderApprentice.activeSessionEndTime
-                              : null
-                          }
-                          helperSpeedMultiplier={getHelperSpeedMultiplier(
-                            builderApprentice.level
-                          )}
-                          potionBoostEndTime={builderBoostEndTime}
-                          potionSpeedMultiplier={10}
-                          onFinish={() => handleBuilderUpgradeFinished(item.builderIndex)}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {pendingBuilderPotions > 0 && displayedBuilderSavedText && (
-                <div className="bg-amber-500/10 rounded-xl px-3.5 py-2.5 mt-3 border border-amber-400/35 flex justify-between items-center">
-                  <p className="text-[11px] font-extrabold text-[#fbbf24] uppercase tracking-wider">
-                    Preview Boost Time Saved
-                  </p>
-                  <div className="text-sm font-extrabold text-[#fbbf24]">
-                    {displayedBuilderSavedText}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Interactive Monthly Cumulative "TOTAL TIME SAVED" Footer Bar (Builders ONLY) */}
+          {/* Footer of Hero Card: Vibrant Full-Width Import JSON Button + Switch Account */}
+          <div className="mt-5 space-y-2.5">
             <button
               type="button"
               onClick={() => {
                 triggerHaptic(15);
-                setSummaryModalSection('builders');
+                setIsAddingNewAccount(false);
+                setIsImportModalOpen(true);
               }}
-              className="tactile w-full bg-black/40 hover:bg-black/55 rounded-2xl p-4 border border-white/10 hover:border-amber-400/40 flex justify-between items-center transition-all cursor-pointer text-left group"
-              title="Click to view Monthly Builder Potion Summary"
+              className="tactile w-full py-3.5 px-4 rounded-2xl bg-[#E5BA53] hover:bg-[#F3CA65] text-[#0B0E14] font-extrabold text-sm flex items-center justify-between shadow-[0_6px_20px_rgba(243,202,101,0.22)] cursor-pointer transition-all"
             >
-              <div className="flex items-center gap-2">
-                <p className="text-xs font-bold text-gray-200 uppercase tracking-wider group-hover:text-white transition-colors">
-                  Total Time Saved
-                </p>
-                <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-white/10 text-gray-300 group-hover:bg-amber-500/20 group-hover:text-[#fbbf24] transition-colors">
-                  Summary ▸
-                </span>
-              </div>
-              <div id="result-saved" className="text-lg font-extrabold text-elixir">
-                {formatSavedSeconds(monthlyStats.builderSecondsSaved)}
-              </div>
+              <svg
+                className="w-4 h-4 shrink-0"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              <span className="flex-1 text-center">Import village JSON</span>
+              <span className="w-4" aria-hidden="true" />
             </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic(12);
+                setIsVillageSwitcherOpen((prev) => !prev);
+              }}
+              className="tactile w-full py-3 px-4 rounded-2xl bg-[#1A2130]/90 hover:bg-[#222B3E] border border-[#2A3346] text-[#F3CA65] font-bold text-xs sm:text-[13px] flex items-center justify-center gap-2 cursor-pointer transition-all"
+            >
+              <span>
+                Switch village · {accounts.length} saved
+              </span>
+              <span className="text-[11px] opacity-80">
+                {isVillageSwitcherOpen ? '▴' : '▾'}
+              </span>
+            </button>
+
+            {/* Expandable Multi-Account Switcher Drawer (Preserves all village switching, renaming & + Add Village) */}
+            {isVillageSwitcherOpen && (
+              <div className="pt-2 border-t border-white/10 space-y-2">
+                <div className="account-bar-scroll flex items-center gap-2 overflow-x-auto pb-1">
+                  {accounts.map((account) => {
+                    const isActive = account.id === activeAccountId;
+                    return (
+                      <div
+                        key={account.id}
+                        onClick={() => handleAccountChipClick(account)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleAccountChipClick(account);
+                          }
+                        }}
+                        title={
+                          isActive ? `${account.name} (Active)` : `Switch to ${account.name}`
+                        }
+                        className={`tactile shrink-0 px-3.5 py-2 min-h-[38px] rounded-xl text-xs font-extrabold flex items-center gap-2 transition-all cursor-pointer select-none ${
+                          isActive ? 'account-chip-active' : 'account-chip-inactive'
+                        }`}
+                      >
+                        {isActive && (
+                          <span
+                            className="w-2 h-2 rounded-full bg-[#4ADE80] shadow-[0_0_6px_#4ADE80] inline-block shrink-0"
+                            aria-hidden="true"
+                          />
+                        )}
+                        <div className="flex flex-col text-left">
+                          <span className="leading-tight">{account.name}</span>
+                          {account.tag && (
+                            <span className="text-[10px] font-semibold text-[#8E9AA8] leading-tight">
+                              {account.tag}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenRenameModal(account, e);
+                          }}
+                          aria-label={`Edit ${account.name}`}
+                          title={`Edit ${account.name}`}
+                          className={`ml-1 p-1 rounded-md hover:bg-white/15 active:bg-white/25 transition text-[11px] leading-none flex items-center justify-center cursor-pointer ${
+                            isActive ? 'text-[#F3CA65] opacity-95' : 'text-slate-400 opacity-75'
+                          }`}
+                        >
+                          ✏️
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={handleOpenAddVillageModal}
+                    className="tactile account-chip-add shrink-0 px-3.5 py-2 min-h-[38px] rounded-xl text-xs font-bold flex items-center gap-1 transition-all cursor-pointer"
+                  >
+                    <span>+ Add Village</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-        )}
+        </section>
 
-        {/* ================================================================= */}
-        {/* TAB 2: LABORATORY (24x SPEED BOOST ENGINE & INTERACTIVE TIMERS)   */}
-        {/* ================================================================= */}
-        {activeTab === 'laboratory' && (
-          <div key="tab-laboratory" className="tab-panel-fade space-y-4 relative z-10">
-            {/* Dedicated Research Potion Counter HUD (Compact + Inline Conditional Confirm Button) */}
-            <div className="builder-card accent-hero rounded-2xl p-3.5">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-extrabold uppercase tracking-wider text-[#f0abfc]">
-                  ⚗️ Research Boost HUD
-                </span>
-                <div className="flex items-center gap-1.5">
-                  {researchPotions > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        triggerHaptic(15);
-                        setResearchPotions(0);
-                      }}
-                      className="tactile text-[11px] font-bold text-gray-300 hover:text-elixir transition cursor-pointer bg-white/10 px-2 py-0.5 rounded-md"
-                    >
-                      Clear
-                    </button>
-                  )}
-                  <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-fuchsia-500/20 text-[#f0abfc] border border-fuchsia-400/40">
-                    24x Speed Boost
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-2 bg-black/40 rounded-xl p-1.5 border border-white/10">
-                <button
-                  type="button"
-                  onClick={() => adjustResearchPotions(-1)}
-                  className="tactile w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white font-extrabold text-lg flex items-center justify-center border border-white/15 cursor-pointer shrink-0"
-                  aria-label="Decrease Research Potion"
-                >
-                  −
-                </button>
-                <div className="text-center flex-1 min-w-0">
-                  <div className="text-sm font-extrabold text-[#f8fafc] leading-tight">
-                    {researchPotions}{' '}
-                    {researchPotions === 1 ? 'Research Potion' : 'Research Potions'}
-                  </div>
-                  <div className="text-[10px] font-bold text-fuchsia-300/90 leading-tight mt-0.5">
-                    24x Speed Boost (Saves 23h per potion)
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => adjustResearchPotions(1)}
-                  className="tactile w-9 h-9 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 text-[#f0abfc] font-extrabold text-lg flex items-center justify-center border border-fuchsia-400/40 cursor-pointer shrink-0"
-                  aria-label="Increase Research Potion"
-                >
-                  +
-                </button>
-              </div>
+        {/* =============================================================== */}
+        {/* B. 3-STAT METRIC ROW (BUILDERS | NEXT FREE | NEXT LAB)          */}
+        {/* =============================================================== */}
+        <LedgerQuickStatsRow
+          busyRegularCount={busyRegularBuildersCount}
+          regularCap={regularBuildersCap}
+          isGoblinBusy={isGoblinBuilderBusy}
+          soonestBuilderItem={soonestBuilderItem}
+          builderBoostEndTime={builderBoostEndTime}
+          builderApprentice={builderApprentice}
+          targetLabTimestamp={targetLabTimestamp}
+          targetGoblinLabTimestamp={targetGoblinLabTimestamp}
+          labBoostEndTime={labBoostEndTime}
+          labApprentice={labApprentice}
+        />
 
-              {/* Conditional Inline Confirm Action Button (Visible ONLY when researchPotions > 0) */}
-              {researchPotions > 0 && (
-                <button
-                  type="button"
-                  onClick={handleLabPrimaryAction}
-                  className="tactile mt-2.5 w-full font-extrabold text-xs sm:text-sm rounded-xl py-2.5 px-3 tracking-wide cursor-pointer transition-all bg-gradient-to-r from-fuchsia-500 via-pink-500 to-amber-500 text-white border border-fuchsia-300/60 shadow-[0_0_20px_rgba(232,121,249,0.35)] flex items-center justify-center gap-1.5"
-                >
-                  <span>
-                    ⚡ Confirm & Activate Boost ({researchPotions}{' '}
-                    {researchPotions === 1 ? 'Potion' : 'Potions'})
-                  </span>
-                </button>
-              )}
-
-              {/* Active Laboratory Boost Live Countdown Badge */}
-              <ActiveBoostHudBadge
-                boostEndTime={labBoostEndTime}
-                variant="laboratory"
-                onExpire={handleLabBoostExpire}
-              />
+        {/* =============================================================== */}
+        {/* POTIONS & HELPERS BOOST HUB ("Your village, boosted")           */}
+        {/* =============================================================== */}
+        <section className="ledger-boost-card rounded-3xl p-4 sm:p-5 transition-all">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => {
+              triggerHaptic(12);
+              setIsBoostDrawerOpen((prev) => !prev);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                triggerHaptic(12);
+                setIsBoostDrawerOpen((prev) => !prev);
+              }
+            }}
+            className="flex items-center justify-between gap-3.5 cursor-pointer"
+          >
+            {/* Left Gold Clock Icon */}
+            <div className="w-12 h-12 rounded-full border-[3px] border-[#F3CA65] flex items-center justify-center shrink-0 text-[#F3CA65] shadow-[0_0_15px_rgba(243,202,101,0.18)]">
+              <svg
+                className="w-6 h-6"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
             </div>
 
-            {/* ============================================================= */}
-            {/* PRIMARY LABORATORY UPGRADE — DUAL-CARD ARCHITECTURE           */}
-            {/* ============================================================= */}
-            {/* Part A: Live Locked Schedule Card (Primary Lab) */}
-            <div className="builder-card accent-hero rounded-2xl p-4">
-              <div className="builder-header-sep flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="slot-badge-hero">[LAB]</span>
-                  <span className="upgrade-title">
-                    {labTimer.upgradeTitle || 'Troop / Spell Upgrade'}
-                  </span>
-                  {typeof labTimer.upgradeLevel === 'number' && (
-                    <span className="lvl-chip">
-                      LVL {labTimer.upgradeLevel} → LVL {labTimer.upgradeLevel + 1}
-                    </span>
+            {/* Middle Text */}
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-extrabold tracking-[0.16em] text-[#CBD5E1] uppercase">
+                POTIONS & HELPERS
+              </p>
+              <h3 className="text-lg sm:text-xl font-black text-white tracking-tight leading-snug">
+                Your village, boosted
+              </h3>
+              <p
+                className={`text-xs font-bold mt-0.5 truncate ${
+                  activeBoostTags.length > 0 ? 'text-[#4ADE80]' : 'text-[#CBD5E1]'
+                }`}
+              >
+                {boostHeadlineStatus}
+              </p>
+              <p className="text-[11px] font-medium text-[#8E9AA8] truncate">
+                {boostSublineStatus}
+              </p>
+            </div>
+
+            {/* Right + Toggle Button */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                triggerHaptic(12);
+                setIsBoostDrawerOpen((prev) => !prev);
+              }}
+              aria-label="Toggle Potions and Helpers drawer"
+              className="tactile w-11 h-11 rounded-2xl bg-[#121622] hover:bg-[#1A2030] border border-[#2E3646] flex items-center justify-center text-[#F3CA65] text-xl font-bold shrink-0 cursor-pointer"
+            >
+              {isBoostDrawerOpen ? '−' : '+'}
+            </button>
+          </div>
+
+          {/* Expandable Potions & Helpers Controls (Also auto-visible if user has pending potion previews) */}
+          {(isBoostDrawerOpen ||
+            pendingBuilderPotions > 0 ||
+            researchPotions > 0 ||
+            petPotions > 0) && (
+            <div className="mt-4 pt-4 border-t border-white/10 space-y-4">
+              {/* Category Selector inside Boost Hub */}
+              <div className="grid grid-cols-4 gap-1.5 bg-black/40 p-1.5 rounded-2xl border border-white/10">
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleCategoryTabChange('builders');
+                    if (currentMode === 'helpers') setMode('multi');
+                  }}
+                  className={`tactile py-2 px-2 rounded-xl text-[11px] font-extrabold transition-all cursor-pointer border ${
+                    activeTab === 'builders' && currentMode !== 'helpers'
+                      ? 'bg-[#252D3D] text-[#F3CA65] border-[#3B465E]'
+                      : 'border-transparent text-[#8E9AA8] hover:text-white'
+                  }`}
+                >
+                  🔨 Builder 10x
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryTabChange('laboratory')}
+                  className={`tactile py-2 px-2 rounded-xl text-[11px] font-extrabold transition-all cursor-pointer border ${
+                    activeTab === 'laboratory'
+                      ? 'bg-[#252D3D] text-[#F3CA65] border-[#3B465E]'
+                      : 'border-transparent text-[#8E9AA8] hover:text-white'
+                  }`}
+                >
+                  ⚗️ Lab 24x
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryTabChange('pethouse')}
+                  className={`tactile py-2 px-2 rounded-xl text-[11px] font-extrabold transition-all cursor-pointer border ${
+                    activeTab === 'pethouse'
+                      ? 'bg-[#252D3D] text-[#F3CA65] border-[#3B465E]'
+                      : 'border-transparent text-[#8E9AA8] hover:text-white'
+                  }`}
+                >
+                  🐾 Pet 24x
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleCategoryTabChange('builders');
+                    setMode('helpers');
+                  }}
+                  className={`tactile py-2 px-2 rounded-xl text-[11px] font-extrabold transition-all cursor-pointer border flex items-center justify-center gap-1 ${
+                    activeTab === 'builders' && currentMode === 'helpers'
+                      ? 'bg-[#252D3D] text-[#4ADE80] border-[#3B465E]'
+                      : 'border-transparent text-[#8E9AA8] hover:text-white'
+                  }`}
+                >
+                  {(isBuilderHelperWorking || isLabHelperWorking) && (
+                    <span className="helper-pulse-dot" />
                   )}
-                  {isLabHelperWorking && labApprentice.assignedSlot === 'main' && (
-                    <span className="helper-pulse-dot" title="Apprentice Active"></span>
-                  )}
-                </div>
-                {targetLabTimestamp && (
+                  <span>👷 Helpers</span>
+                </button>
+              </div>
+
+              {/* 1. BUILDER POTIONS 10x PANEL */}
+              {activeTab === 'builders' && currentMode !== 'helpers' && (
+                <div className="space-y-3">
+                  <div className="builder-card accent-gold rounded-2xl p-3.5">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-extrabold uppercase tracking-wider text-[#F3CA65]">
+                        🧪 Builder Potions Used
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {pendingBuilderPotions > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              triggerHaptic(15);
+                              setPotionsInput('0');
+                            }}
+                            className="tactile text-[11px] font-bold text-gray-300 hover:text-white transition cursor-pointer bg-white/10 px-2 py-0.5 rounded-md"
+                          >
+                            Clear
+                          </button>
+                        )}
+                        <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-500/20 text-[#F3CA65] border border-amber-400/40">
+                          10x Speed Boost
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 bg-black/40 rounded-xl p-1.5 border border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => adjustPotions(-1)}
+                        className="tactile w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white font-extrabold text-lg flex items-center justify-center border border-white/15 cursor-pointer shrink-0"
+                        aria-label="Decrease potions"
+                      >
+                        −
+                      </button>
+                      <div className="text-center flex-1 min-w-0">
+                        <div className="text-sm font-extrabold text-[#f8fafc] leading-tight">
+                          {pendingBuilderPotions}{' '}
+                          {pendingBuilderPotions === 1 ? 'Builder Potion' : 'Builder Potions'}
+                        </div>
+                        <div className="text-[10px] font-bold text-amber-300/90 leading-tight mt-0.5">
+                          10x Speed Boost (Saves 9h per potion)
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => adjustPotions(1)}
+                        className="tactile w-9 h-9 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-[#F3CA65] font-extrabold text-lg flex items-center justify-center border border-amber-400/40 cursor-pointer shrink-0"
+                        aria-label="Increase potions"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    {pendingBuilderPotions > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleBuilderPrimaryAction}
+                        className="tactile mt-2.5 w-full font-extrabold text-xs sm:text-sm rounded-xl py-2.5 px-3 tracking-wide cursor-pointer transition-all bg-[#E5BA53] hover:bg-[#F3CA65] text-[#0B0E14] shadow-md flex items-center justify-center gap-1.5"
+                      >
+                        <span>
+                          ⚡ Confirm & Activate Boost ({pendingBuilderPotions}{' '}
+                          {pendingBuilderPotions === 1 ? 'Potion' : 'Potions'})
+                        </span>
+                      </button>
+                    )}
+
+                    {pendingBuilderPotions > 0 && displayedBuilderSavedText && (
+                      <div className="bg-amber-500/10 rounded-xl px-3 py-2 mt-2.5 border border-amber-400/35 flex justify-between items-center">
+                        <p className="text-[11px] font-extrabold text-[#F3CA65] uppercase tracking-wider">
+                          Preview Boost Time Saved
+                        </p>
+                        <div className="text-xs font-extrabold text-[#F3CA65]">
+                          {displayedBuilderSavedText}
+                        </div>
+                      </div>
+                    )}
+
+                    <ActiveBoostHudBadge
+                      boostEndTime={builderBoostEndTime}
+                      variant="builders"
+                      onExpire={handleBuilderBoostExpire}
+                    />
+                  </div>
+
                   <button
                     type="button"
                     onClick={() => {
                       triggerHaptic(15);
-                      setAssignModalType('lab');
+                      setSummaryModalSection('builders');
                     }}
-                    className={`tactile text-[10px] font-extrabold px-2 py-0.5 rounded-md border cursor-pointer transition-all ${
-                      isLabHelperWorking && labApprentice.assignedSlot === 'main'
-                        ? 'bg-emerald-500/20 text-[#22c55e] border-emerald-400/50 animate-pulse'
-                        : labApprentice.assignedSlot === 'main'
-                        ? 'bg-cyan-500/15 text-cyan-300 border-cyan-400/40'
-                        : 'bg-white/10 hover:bg-white/15 text-fuchsia-200 border-white/15'
-                    }`}
-                    title="Assign or inspect Lab Apprentice boost"
+                    className="tactile w-full bg-black/40 hover:bg-black/55 rounded-2xl p-3.5 border border-white/10 hover:border-amber-400/40 flex justify-between items-center transition-all cursor-pointer text-left"
                   >
-                    {isLabHelperWorking && labApprentice.assignedSlot === 'main'
-                      ? `⚡ ${getHelperSpeedMultiplier(labApprentice.level)}x Boost Running`
-                      : labApprentice.assignedSlot === 'main'
-                      ? `🔬 ${getHelperSpeedMultiplier(labApprentice.level)}x Helper Assigned`
-                      : `🔬 Assign Helper (${getHelperSpeedMultiplier(labApprentice.level)}x)`}
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-bold text-gray-200 uppercase tracking-wider">
+                        Builder Time Saved (Month)
+                      </p>
+                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-white/10 text-[#F3CA65]">
+                        Summary ▸
+                      </span>
+                    </div>
+                    <div className="text-base font-extrabold text-[#F3CA65]">
+                      {formatSavedSeconds(monthlyStats.builderSecondsSaved)}
+                    </div>
                   </button>
-                )}
-              </div>
-
-              {targetLabTimestamp && (
-                <div className="flex items-baseline gap-2 mb-3">
-                  <span className="text-[10px] uppercase tracking-wider text-gray-300 font-bold">
-                    {researchPotions > 0 ? 'Preview Completes On:' : 'Completes On:'}
-                  </span>
-                  <span className="text-sm sm:text-base font-extrabold text-[#f0abfc]">
-                    {displayedLabDate}
-                  </span>
                 </div>
               )}
 
-              {/* Live Countdown Digits with Active Boost Indicators */}
-              <div className={targetLabTimestamp ? 'pt-2.5 border-t border-white/10' : ''}>
-                {targetLabTimestamp ? (
-                  <LiveHudTicker
-                    targetTimestamp={targetLabTimestamp}
-                    helper={labApprentice}
-                    isHelperAssignedToSlot={labApprentice.assignedSlot === 'main'}
-                    helperIcon="🔬"
-                    helperBoostEndTime={
-                      isLabHelperWorking && labApprentice.assignedSlot === 'main'
-                        ? labHelperCycleNow.activeRemSec > 0
-                          ? nowTick + labHelperCycleNow.activeRemSec * 1000
-                          : labApprentice.activeSessionEndTime
-                        : null
-                    }
-                    helperSpeedMultiplier={getHelperSpeedMultiplier(labApprentice.level)}
-                    potionBoostEndTime={labBoostEndTime}
-                    potionSpeedMultiplier={24}
-                    label="Live Countdown"
-                    finishBadgeText="⚡ RESEARCH FINISHED! LAB FREE"
-                    accentColorClass="text-[#f0abfc]"
-                    onFinish={() => handleLabUpgradeFinished('main')}
+              {/* 2. RESEARCH POTIONS 24x PANEL */}
+              {activeTab === 'laboratory' && (
+                <div className="space-y-3">
+                  <div className="builder-card accent-hero rounded-2xl p-3.5">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-extrabold uppercase tracking-wider text-[#f0abfc]">
+                        ⚗️ Research Boost HUD
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {researchPotions > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              triggerHaptic(15);
+                              setResearchPotions(0);
+                            }}
+                            className="tactile text-[11px] font-bold text-gray-300 hover:text-white transition cursor-pointer bg-white/10 px-2 py-0.5 rounded-md"
+                          >
+                            Clear
+                          </button>
+                        )}
+                        <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-fuchsia-500/20 text-[#f0abfc] border border-fuchsia-400/40">
+                          24x Speed Boost
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 bg-black/40 rounded-xl p-1.5 border border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => adjustResearchPotions(-1)}
+                        className="tactile w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white font-extrabold text-lg flex items-center justify-center border border-white/15 cursor-pointer shrink-0"
+                        aria-label="Decrease Research Potion"
+                      >
+                        −
+                      </button>
+                      <div className="text-center flex-1 min-w-0">
+                        <div className="text-sm font-extrabold text-[#f8fafc] leading-tight">
+                          {researchPotions}{' '}
+                          {researchPotions === 1 ? 'Research Potion' : 'Research Potions'}
+                        </div>
+                        <div className="text-[10px] font-bold text-fuchsia-300/90 leading-tight mt-0.5">
+                          24x Speed Boost (Saves 23h per potion)
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => adjustResearchPotions(1)}
+                        className="tactile w-9 h-9 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 text-[#f0abfc] font-extrabold text-lg flex items-center justify-center border border-fuchsia-400/40 cursor-pointer shrink-0"
+                        aria-label="Increase Research Potion"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    {researchPotions > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleLabPrimaryAction}
+                        className="tactile mt-2.5 w-full font-extrabold text-xs sm:text-sm rounded-xl py-2.5 px-3 tracking-wide cursor-pointer transition-all bg-gradient-to-r from-fuchsia-500 via-pink-500 to-amber-500 text-white border border-fuchsia-300/60 shadow-md flex items-center justify-center gap-1.5"
+                      >
+                        <span>
+                          ⚡ Confirm & Activate Boost ({researchPotions}{' '}
+                          {researchPotions === 1 ? 'Potion' : 'Potions'})
+                        </span>
+                      </button>
+                    )}
+
+                    {researchPotions > 0 && displayedLabSavedText && (
+                      <div className="bg-fuchsia-500/10 rounded-xl px-3 py-2 mt-2.5 border border-fuchsia-400/35 flex justify-between items-center">
+                        <p className="text-[11px] font-extrabold text-[#f0abfc] uppercase tracking-wider">
+                          Preview Research Time Saved
+                        </p>
+                        <div className="text-xs font-extrabold text-[#f0abfc]">
+                          {displayedLabSavedText}
+                        </div>
+                      </div>
+                    )}
+
+                    <ActiveBoostHudBadge
+                      boostEndTime={labBoostEndTime}
+                      variant="laboratory"
+                      onExpire={handleLabBoostExpire}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(15);
+                      setSummaryModalSection('lab');
+                    }}
+                    className="tactile w-full bg-black/40 hover:bg-black/55 rounded-2xl p-3.5 border border-white/10 hover:border-fuchsia-400/40 flex justify-between items-center transition-all cursor-pointer text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-bold text-gray-200 uppercase tracking-wider">
+                        Lab Time Saved (Month)
+                      </p>
+                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-white/10 text-[#f0abfc]">
+                        Summary ▸
+                      </span>
+                    </div>
+                    <div className="text-base font-extrabold text-[#f0abfc]">
+                      {formatSavedSeconds(monthlyStats.labSecondsSaved)}
+                    </div>
+                  </button>
+                </div>
+              )}
+
+              {/* 3. PET POTIONS 24x PANEL */}
+              {activeTab === 'pethouse' && (
+                <div className="space-y-3">
+                  <div className="builder-card accent-pet rounded-2xl p-3.5">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-extrabold uppercase tracking-wider text-[#4ADE80]">
+                        🐾 Pet Potion Boost HUD
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {petPotions > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              triggerHaptic(15);
+                              setPetPotions(0);
+                            }}
+                            className="tactile text-[11px] font-bold text-gray-300 hover:text-white transition cursor-pointer bg-white/10 px-2 py-0.5 rounded-md"
+                          >
+                            Clear
+                          </button>
+                        )}
+                        <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-emerald-500/20 text-[#4ADE80] border border-emerald-400/40">
+                          24x Speed Boost
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 bg-black/40 rounded-xl p-1.5 border border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => adjustPetPotions(-1)}
+                        className="tactile w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white font-extrabold text-lg flex items-center justify-center border border-white/15 cursor-pointer shrink-0"
+                        aria-label="Decrease Pet Potion"
+                      >
+                        −
+                      </button>
+                      <div className="text-center flex-1 min-w-0">
+                        <div className="text-sm font-extrabold text-[#f8fafc] leading-tight">
+                          {petPotions} {petPotions === 1 ? 'Pet Potion' : 'Pet Potions'}
+                        </div>
+                        <div className="text-[10px] font-bold text-emerald-300/90 leading-tight mt-0.5">
+                          24x Speed Boost (Saves 23h per potion)
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => adjustPetPotions(1)}
+                        className="tactile w-9 h-9 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-[#4ADE80] font-extrabold text-lg flex items-center justify-center border border-emerald-400/40 cursor-pointer shrink-0"
+                        aria-label="Increase Pet Potion"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    {petPotions > 0 && (
+                      <button
+                        type="button"
+                        onClick={handlePetPrimaryAction}
+                        className="tactile mt-2.5 w-full font-extrabold text-xs sm:text-sm rounded-xl py-2.5 px-3 tracking-wide cursor-pointer transition-all bg-gradient-to-r from-emerald-500 via-teal-500 to-amber-500 text-white border border-emerald-300/60 shadow-md flex items-center justify-center gap-1.5"
+                      >
+                        <span>
+                          ⚡ Confirm & Activate Boost ({petPotions}{' '}
+                          {petPotions === 1 ? 'Potion' : 'Potions'})
+                        </span>
+                      </button>
+                    )}
+
+                    {petPotions > 0 && displayedPetSavedText && (
+                      <div className="bg-emerald-500/10 rounded-xl px-3 py-2 mt-2.5 border border-emerald-400/35 flex justify-between items-center">
+                        <p className="text-[11px] font-extrabold text-[#4ADE80] uppercase tracking-wider">
+                          Preview Pet Time Saved
+                        </p>
+                        <div className="text-xs font-extrabold text-[#4ADE80]">
+                          {displayedPetSavedText}
+                        </div>
+                      </div>
+                    )}
+
+                    <ActiveBoostHudBadge
+                      boostEndTime={petBoostEndTime}
+                      variant="pethouse"
+                      onExpire={handlePetBoostExpire}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(15);
+                      setSummaryModalSection('pethouse');
+                    }}
+                    className="tactile w-full bg-black/40 hover:bg-black/55 rounded-2xl p-3.5 border border-white/10 hover:border-emerald-400/40 flex justify-between items-center transition-all cursor-pointer text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-bold text-gray-200 uppercase tracking-wider">
+                        Pet Time Saved (Month)
+                      </p>
+                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-white/10 text-[#4ADE80]">
+                        Summary ▸
+                      </span>
+                    </div>
+                    <div className="text-base font-extrabold text-[#4ADE80]">
+                      {formatSavedSeconds(monthlyStats.petSecondsSaved)}
+                    </div>
+                  </button>
+                </div>
+              )}
+
+              {/* 4. BUILDER & LAB APPRENTICES (HELPERS) PANEL */}
+              {activeTab === 'builders' && currentMode === 'helpers' && (
+                <div className="space-y-3">
+                  <HelperObsidianCard
+                    icon="👷"
+                    title="Builder's Apprentice"
+                    subtitle="Works on Home Village Buildings, Defenses & Heroes (1h Active Session)"
+                    accentVariant="gold"
+                    level={builderApprentice.level}
+                    targetName={builderHelperTargetName}
+                    activeSessionEndTime={builderApprentice.activeSessionEndTime}
+                    cooldownEndTime={builderApprentice.cooldownEndTime}
+                    recurrent={builderApprentice.recurrent}
+                    onChangeLevel={handleChangeBuilderApprenticeLevel}
+                    onOpenAssignModal={() => {
+                      triggerHaptic(15);
+                      setAssignModalType('builder');
+                    }}
+                    onSessionExpire={handleBuilderSessionExpire}
+                    onCooldownExpire={handleBuilderCooldownExpire}
                   />
-                ) : (
-                  <HudTickerIdle
-                    label="Live Countdown"
-                    accentUnitColorClass="text-[#f0abfc]"
-                    statusNote="Standby"
+
+                  <HelperObsidianCard
+                    icon="🔬"
+                    title="Lab Apprentice"
+                    subtitle="Works on Laboratory Troops, Spells & Siege Machines (1h Active Session)"
+                    accentVariant="lab"
+                    level={labApprentice.level}
+                    targetName={labHelperTargetName}
+                    activeSessionEndTime={labApprentice.activeSessionEndTime}
+                    cooldownEndTime={labApprentice.cooldownEndTime}
+                    recurrent={labApprentice.recurrent}
+                    onChangeLevel={handleChangeLabApprenticeLevel}
+                    onOpenAssignModal={() => {
+                      triggerHaptic(15);
+                      setAssignModalType('lab');
+                    }}
+                    onSessionExpire={handleLabSessionExpire}
+                    onCooldownExpire={handleLabCooldownExpire}
                   />
-                )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* =============================================================== */}
+        {/* SEGMENTED FILTER BAR (CLASH LEDGER PILL STYLE)                  */}
+        {/* =============================================================== */}
+        <div className="grid grid-cols-3 gap-1.5 bg-[#131722] p-1.5 rounded-2xl border border-[#232A38]">
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic(10);
+              setQueueFilter('all');
+            }}
+            className={`tactile py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all cursor-pointer border ${
+              queueFilter === 'all'
+                ? 'bg-[#252D3D] text-[#F3CA65] border-[#3B465E] shadow-sm'
+                : 'border-transparent text-[#8E9AA8] hover:text-white'
+            }`}
+          >
+            Home Village
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic(10);
+              setQueueFilter('builders');
+            }}
+            className={`tactile py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all cursor-pointer border ${
+              queueFilter === 'builders'
+                ? 'bg-[#252D3D] text-[#F3CA65] border-[#3B465E] shadow-sm'
+                : 'border-transparent text-[#8E9AA8] hover:text-white'
+            }`}
+          >
+            Builders ({displayedBuilderResults.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic(10);
+              setQueueFilter('lab_pets');
+            }}
+            className={`tactile py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all cursor-pointer border ${
+              queueFilter === 'lab_pets'
+                ? 'bg-[#252D3D] text-[#F3CA65] border-[#3B465E] shadow-sm'
+                : 'border-transparent text-[#8E9AA8] hover:text-white'
+            }`}
+          >
+            Lab & Pets ({activeLabQueueCount + activePetQueueCount})
+          </button>
+        </div>
+
+        {/* =============================================================== */}
+        {/* C. UPGRADE QUEUE HEADER & COLLAPSIBLE MANUAL TIMER EDITOR       */}
+        {/* =============================================================== */}
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+              Upgrade queue
+            </h2>
+            {isEditingTimers && !isTimersCollapsed && (
+              <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-500/20 text-[#F3CA65] border border-amber-400/40 animate-pulse">
+                Editing
+              </span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={handleToggleTimersAccordion}
+            className="tactile px-4 py-2.5 rounded-2xl bg-[#161B26] hover:bg-[#1E2534] border border-[#2A303C] text-[#F3CA65] font-extrabold text-xs sm:text-[13px] flex items-center gap-1.5 cursor-pointer shadow-sm"
+          >
+            <span>{isTimersCollapsed ? '+ Add / Edit' : '▾ Hide Editor'}</span>
+          </button>
+        </div>
+
+        {/* Collapsible Manual Timer Editor (Builders, Laboratory, Pet House) */}
+        {!isTimersCollapsed && (
+          <section className="rounded-3xl bg-[#161B26] border border-[#2A303C] p-4 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-white/10">
+              <span className="text-xs font-extrabold uppercase tracking-wider text-[#F3CA65]">
+                Manual Timer Editor
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleCategoryTabChange('builders')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold cursor-pointer ${
+                    activeTab === 'builders'
+                      ? 'bg-[#F3CA65] text-[#0B0E14]'
+                      : 'bg-white/5 text-[#8E9AA8] hover:text-white'
+                  }`}
+                >
+                  Builders
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryTabChange('laboratory')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold cursor-pointer ${
+                    activeTab === 'laboratory'
+                      ? 'bg-[#F3CA65] text-[#0B0E14]'
+                      : 'bg-white/5 text-[#8E9AA8] hover:text-white'
+                  }`}
+                >
+                  Lab
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryTabChange('pethouse')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold cursor-pointer ${
+                    activeTab === 'pethouse'
+                      ? 'bg-[#F3CA65] text-[#0B0E14]'
+                      : 'bg-white/5 text-[#8E9AA8] hover:text-white'
+                  }`}
+                >
+                  Pet House
+                </button>
               </div>
             </div>
 
-            {/* Part B: Collapsible "Manual Edit / Timers" Section (Primary Lab) */}
-            <div className="rounded-2xl bg-black/35 border border-white/10 px-3.5 py-2.5">
-              <div
-                role="button"
-                tabIndex={0}
-                aria-expanded={!isLabMainEditCollapsed}
-                onClick={() => {
-                  triggerHaptic(12);
-                  setIsLabMainEditCollapsed((prev) => !prev);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    triggerHaptic(12);
-                    setIsLabMainEditCollapsed((prev) => !prev);
-                  }
-                }}
-                className="tactile w-full flex items-center justify-between gap-2 py-1 rounded-xl cursor-pointer select-none"
-              >
-                <span className="text-xs uppercase tracking-wider text-[#f0abfc] font-extrabold">
-                  Manual Edit / Lab Timer
-                </span>
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold bg-fuchsia-500/15 text-[#f0abfc] border border-fuchsia-400/35 shadow-sm transition-all">
-                  <span>{isLabMainEditCollapsed ? '▸ Edit Timer' : '▾ Hide Edit Controls'}</span>
-                </span>
-              </div>
+            {activeTab === 'builders' && (
+              <div className="space-y-4">
+                {/* Mode Toggle: Single vs All Builders */}
+                <div className="flex bg-black/40 rounded-xl p-1 border border-white/10 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setMode('single')}
+                    className={`tactile flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                      currentMode === 'single'
+                        ? 'bg-white/20 text-white shadow-sm'
+                        : 'text-gray-300 hover:text-white'
+                    }`}
+                  >
+                    Single Builder
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode('multi')}
+                    className={`tactile flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                      currentMode !== 'single'
+                        ? 'bg-white/20 text-white shadow-sm'
+                        : 'text-gray-300 hover:text-white'
+                    }`}
+                  >
+                    All Builders
+                  </button>
+                </div>
 
-              <div
-                className={`grid transition-all duration-300 ease-in-out ${
-                  isLabMainEditCollapsed
-                    ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
-                    : 'grid-rows-[1fr] opacity-100 mt-3 pt-3 border-t border-white/10'
-                }`}
-              >
-                <div className="overflow-hidden space-y-3">
-                  {/* Lab Days, Hours, Mins Inputs */}
-                  <div className="grid grid-cols-3 gap-3">
+                {/* Safe Edit & Reset Action Bar */}
+                {!isEditingTimers ? (
+                  <div className="flex items-center justify-between gap-2 bg-black/35 p-2.5 rounded-xl border border-white/10">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic(15);
+                        setConfirmDialogType('start_edit');
+                      }}
+                      className="tactile flex-1 py-2 px-3 rounded-lg text-xs font-extrabold text-[#F3CA65] bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <span>✏️ Unlock & Edit Timers</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic(15);
+                        setConfirmDialogType('reset_all');
+                      }}
+                      className="tactile py-2 px-3 rounded-lg text-xs font-extrabold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <span>🗑️ Reset All</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="rounded-xl p-3 bg-amber-950/40 border border-amber-400/45 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-extrabold text-[#F3CA65] uppercase tracking-wider">
+                        ✏️ Editing Timers (Unconfirmed)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          triggerHaptic(15);
+                          setConfirmDialogType('reset_all');
+                        }}
+                        className="tactile text-[11px] font-bold text-rose-300 hover:text-rose-200 px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 cursor-pointer"
+                      >
+                        Reset All
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          triggerHaptic(15);
+                          discardUnconfirmedTimerEdits();
+                          showToast('success', 'Reverted to previous locked timers');
+                        }}
+                        className="tactile flex-1 py-2 px-3 rounded-lg text-xs font-bold text-gray-200 bg-white/10 hover:bg-white/15 border border-white/15 cursor-pointer"
+                      >
+                        ✕ Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          triggerHaptic(15);
+                          setConfirmDialogType('apply_edit');
+                        }}
+                        className="btn-calculate tactile flex-1 py-2 px-3 rounded-lg text-xs font-extrabold text-white shadow-md cursor-pointer"
+                      >
+                        ✓ Apply Changes
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Active Builders Count Slider */}
+                {currentMode !== 'single' && (
+                  <div className="bg-black/30 p-3.5 rounded-2xl border border-white/10">
+                    <div className="flex justify-between items-center mb-2.5">
+                      <label className="text-sm text-[#f8fafc] font-bold">
+                        Active Builders
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleBuilderCountChange(numBuilders - 1)}
+                          className="tactile w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-white font-bold flex items-center justify-center cursor-pointer border border-white/10"
+                        >
+                          −
+                        </button>
+                        <div
+                          className={`font-extrabold bg-black/50 px-3 py-1 rounded-lg border text-xs ${
+                            numBuilders === 7
+                              ? 'text-[#4ADE80] border-emerald-500/40'
+                              : 'text-[#F3CA65] border-amber-400/20'
+                          }`}
+                        >
+                          <span>{numBuilders}</span> {numBuilders === 7 ? '👺' : '👷'}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleBuilderCountChange(numBuilders + 1)}
+                          className="tactile w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-white font-bold flex items-center justify-center cursor-pointer border border-white/10"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="7"
+                      value={numBuilders}
+                      onChange={(e) => handleBuilderCountChange(parseInt(e.target.value, 10))}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-[#F3CA65]"
+                    />
+                  </div>
+                )}
+
+                {/* Individual Builder Time Input Cards */}
+                <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                  {Array.from({ length: activeBuildersToRender }, (_, idx) => {
+                    const i = idx + 1;
+                    const isGoblin = currentMode !== 'single' && i === 7;
+                    const builderVal = builders[idx] || { d: '', h: '', m: '' };
+                    const slotBadgeText = isGoblin ? '[GOBLIN]' : `[B${i}]`;
+                    const defaultTitle =
+                      currentMode === 'single'
+                        ? 'Remaining Time'
+                        : isGoblin
+                        ? 'Goblin Builder'
+                        : `Builder ${i}`;
+                    const displayTitle = builderVal.upgradeTitle || defaultTitle;
+
+                    return (
+                      <div
+                        key={i}
+                        className="rounded-2xl p-3.5 bg-[#0F131D] border border-[#2A303C]"
+                      >
+                        <div className="flex flex-wrap justify-between items-center gap-2 mb-2.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className={
+                                isGoblin ? 'slot-badge-goblin' : 'slot-badge-regular'
+                              }
+                            >
+                              {slotBadgeText}
+                            </span>
+                            <span className="text-xs font-extrabold text-white">
+                              {displayTitle}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => resetBuilderTime(idx)}
+                            className="tactile text-[11px] font-bold text-rose-300 px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2.5">
+                          <div className="flex flex-col">
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              value={builderVal.d}
+                              onChange={(e) =>
+                                handleBuilderTimeChange(idx, 'd', e.target.value)
+                              }
+                              placeholder="0"
+                              min="0"
+                              max="999"
+                              className="glass-input w-full rounded-xl py-2 px-2 text-center text-base font-bold placeholder-gray-500"
+                            />
+                            <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
+                              Days
+                            </span>
+                          </div>
+                          <div className="flex flex-col">
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              value={builderVal.h}
+                              onChange={(e) =>
+                                handleBuilderTimeChange(idx, 'h', e.target.value)
+                              }
+                              placeholder="0"
+                              min="0"
+                              max="24"
+                              className="glass-input w-full rounded-xl py-2 px-2 text-center text-base font-bold placeholder-gray-500"
+                            />
+                            <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
+                              Hours
+                            </span>
+                          </div>
+                          <div className="flex flex-col">
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              value={builderVal.m}
+                              onChange={(e) =>
+                                handleBuilderTimeChange(idx, 'm', e.target.value)
+                              }
+                              placeholder="0"
+                              min="0"
+                              max="60"
+                              className="glass-input w-full rounded-xl py-2 px-2 text-center text-base font-bold placeholder-gray-500"
+                            />
+                            <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
+                              Mins
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2.5 pt-2 border-t border-white/10">
+                          {[
+                            { label: '+6h', d: 0, h: 6 },
+                            { label: '+12h', d: 0, h: 12 },
+                            { label: '+1d', d: 1, h: 0 },
+                            { label: '+3d', d: 3, h: 0 },
+                            { label: '+5d', d: 5, h: 0 },
+                            { label: '+7d', d: 7, h: 0 },
+                          ].map((preset) => (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() => applyPresetToBuilder(idx, preset.d, preset.h)}
+                              className="tactile text-[11px] font-bold px-2 py-1 rounded-lg border bg-white/5 hover:bg-white/15 text-white border-white/10 cursor-pointer"
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'laboratory' && (
+              <div className="space-y-4">
+                {/* Primary Lab Manual Editor */}
+                <div className="rounded-2xl p-3.5 bg-[#0F131D] border border-[#2A303C] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-extrabold text-[#f0abfc] uppercase">
+                      [LAB] {labTimer.upgradeTitle || 'Primary Research'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic(15);
+                        setPendingClearSlot('lab_main');
+                      }}
+                      className="tactile text-[11px] font-bold text-rose-300 px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 cursor-pointer"
+                    >
+                      🗑️ Clear
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2.5">
                     <div className="flex flex-col">
                       <input
                         type="number"
@@ -7108,11 +8237,9 @@ export default function App() {
                         value={labTimer.d}
                         onChange={(e) => handleLabTimeChange('main', 'd', e.target.value)}
                         placeholder="0"
-                        min="0"
-                        max="999"
-                        className="glass-input lab-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
+                        className="glass-input lab-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
                       />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
+                      <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
                         Days
                       </span>
                     </div>
@@ -7123,11 +8250,9 @@ export default function App() {
                         value={labTimer.h}
                         onChange={(e) => handleLabTimeChange('main', 'h', e.target.value)}
                         placeholder="0"
-                        min="0"
-                        max="24"
-                        className="glass-input lab-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
+                        className="glass-input lab-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
                       />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
+                      <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
                         Hours
                       </span>
                     </div>
@@ -7138,18 +8263,14 @@ export default function App() {
                         value={labTimer.m}
                         onChange={(e) => handleLabTimeChange('main', 'm', e.target.value)}
                         placeholder="0"
-                        min="0"
-                        max="60"
-                        className="glass-input lab-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
+                        className="glass-input lab-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
                       />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
+                      <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
                         Mins
                       </span>
                     </div>
                   </div>
-
-                  {/* Quick Time Presets for Lab */}
-                  <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-white/10">
+                  <div className="flex flex-wrap gap-1.5">
                     {[
                       { label: '+6h', d: 0, h: 6 },
                       { label: '+12h', d: 0, h: 12 },
@@ -7162,136 +8283,32 @@ export default function App() {
                         key={preset.label}
                         type="button"
                         onClick={() => applyPresetToLab('main', preset.d, preset.h)}
-                        className="tactile text-xs font-bold px-2.5 py-1 rounded-lg border bg-fuchsia-500/15 hover:bg-fuchsia-500/25 text-fuchsia-200 border-fuchsia-500/30 cursor-pointer"
+                        className="tactile text-[11px] font-bold px-2 py-1 rounded-lg border bg-fuchsia-500/15 text-fuchsia-200 border-fuchsia-500/30 cursor-pointer"
                       >
                         {preset.label}
                       </button>
                     ))}
                   </div>
+                </div>
 
-                  {/* Single Protected Reset / Clear Upgrade Action */}
-                  <div className="pt-2 border-t border-white/10">
+                {/* Goblin Lab Manual Editor */}
+                <div className="rounded-2xl p-3.5 bg-[#0F131D] border border-[#2A303C] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-extrabold text-[#4ADE80] uppercase">
+                      [GOBLIN LAB] {goblinLabTimer.upgradeTitle || 'Goblin Researcher'}
+                    </span>
                     <button
                       type="button"
                       onClick={() => {
                         triggerHaptic(15);
-                        setPendingClearSlot('lab_main');
+                        setPendingClearSlot('lab_goblin');
                       }}
-                      className="tactile w-full py-2 px-3 rounded-xl text-xs font-extrabold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 flex items-center justify-center gap-1.5 cursor-pointer"
+                      className="tactile text-[11px] font-bold text-rose-300 px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 cursor-pointer"
                     >
-                      <span>🗑️ Reset / Clear Upgrade</span>
+                      🗑️ Clear
                     </button>
                   </div>
-                </div>
-              </div>
-            </div>
-
-            {/* ============================================================= */}
-            {/* GOBLIN LAB RESEARCHER — DUAL-CARD ARCHITECTURE                */}
-            {/* ============================================================= */}
-            {/* Part A: Live Locked Schedule Card (Goblin Lab) */}
-            <div className="goblin-card accent-goblin rounded-2xl p-4">
-              <div className="builder-header-sep flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="slot-badge-goblin">[GOBLIN LAB]</span>
-                  <span className="upgrade-title">
-                    {goblinLabTimer.upgradeTitle || 'Goblin Researcher'}
-                  </span>
-                  {typeof goblinLabTimer.upgradeLevel === 'number' && (
-                    <span className="lvl-chip-goblin">
-                      LVL {goblinLabTimer.upgradeLevel} → LVL {goblinLabTimer.upgradeLevel + 1}
-                    </span>
-                  )}
-                  {isLabHelperWorking && labApprentice.assignedSlot === 'goblin' && (
-                    <span className="helper-pulse-dot" title="Apprentice Active"></span>
-                  )}
-                </div>
-                <span className="text-[10px] font-bold text-[#22c55e] uppercase tracking-wider">
-                  👺 Extra Research
-                </span>
-              </div>
-
-              {targetGoblinLabTimestamp && (
-                <div className="flex items-baseline gap-2 mb-3">
-                  <span className="text-[10px] uppercase tracking-wider text-gray-300 font-bold">
-                    {researchPotions > 0 ? 'Preview Completes On:' : 'Completes On:'}
-                  </span>
-                  <span className="text-sm sm:text-base font-extrabold text-[#22c55e]">
-                    {displayedGoblinLabDate}
-                  </span>
-                </div>
-              )}
-
-              {/* Live Countdown Digits with Active Boost Indicators */}
-              <div className={targetGoblinLabTimestamp ? 'pt-2.5 border-t border-white/10' : ''}>
-                {targetGoblinLabTimestamp ? (
-                  <LiveHudTicker
-                    targetTimestamp={targetGoblinLabTimestamp}
-                    helper={labApprentice}
-                    isHelperAssignedToSlot={labApprentice.assignedSlot === 'goblin'}
-                    helperIcon="🔬"
-                    helperBoostEndTime={
-                      isLabHelperWorking && labApprentice.assignedSlot === 'goblin'
-                        ? labHelperCycleNow.activeRemSec > 0
-                          ? nowTick + labHelperCycleNow.activeRemSec * 1000
-                          : labApprentice.activeSessionEndTime
-                        : null
-                    }
-                    helperSpeedMultiplier={getHelperSpeedMultiplier(labApprentice.level)}
-                    potionBoostEndTime={labBoostEndTime}
-                    potionSpeedMultiplier={24}
-                    label="Live Countdown"
-                    finishBadgeText="⚡ GOBLIN RESEARCH FINISHED!"
-                    accentColorClass="text-[#22c55e]"
-                    onFinish={() => handleLabUpgradeFinished('goblin')}
-                  />
-                ) : (
-                  <HudTickerIdle
-                    label="Live Countdown"
-                    accentUnitColorClass="text-[#22c55e]"
-                    statusNote="Standby"
-                  />
-                )}
-              </div>
-            </div>
-
-            {/* Part B: Collapsible "Manual Edit / Timers" Section (Goblin Lab) */}
-            <div className="rounded-2xl bg-black/35 border border-white/10 px-3.5 py-2.5">
-              <div
-                role="button"
-                tabIndex={0}
-                aria-expanded={!isLabGoblinEditCollapsed}
-                onClick={() => {
-                  triggerHaptic(12);
-                  setIsLabGoblinEditCollapsed((prev) => !prev);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    triggerHaptic(12);
-                    setIsLabGoblinEditCollapsed((prev) => !prev);
-                  }
-                }}
-                className="tactile w-full flex items-center justify-between gap-2 py-1 rounded-xl cursor-pointer select-none"
-              >
-                <span className="text-xs uppercase tracking-wider text-[#22c55e] font-extrabold">
-                  Manual Edit / Goblin Lab Timer
-                </span>
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold bg-emerald-500/15 text-[#22c55e] border border-emerald-400/35 shadow-sm transition-all">
-                  <span>{isLabGoblinEditCollapsed ? '▸ Edit Timer' : '▾ Hide Edit Controls'}</span>
-                </span>
-              </div>
-
-              <div
-                className={`grid transition-all duration-300 ease-in-out ${
-                  isLabGoblinEditCollapsed
-                    ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
-                    : 'grid-rows-[1fr] opacity-100 mt-3 pt-3 border-t border-white/10'
-                }`}
-              >
-                <div className="overflow-hidden space-y-3">
-                  {/* Goblin Lab Days, Hours, Mins Inputs */}
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-3 gap-2.5">
                     <div className="flex flex-col">
                       <input
                         type="number"
@@ -7299,11 +8316,9 @@ export default function App() {
                         value={goblinLabTimer.d}
                         onChange={(e) => handleLabTimeChange('goblin', 'd', e.target.value)}
                         placeholder="0"
-                        min="0"
-                        max="999"
-                        className="glass-input goblin-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
+                        className="glass-input goblin-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
                       />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
+                      <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
                         Days
                       </span>
                     </div>
@@ -7314,11 +8329,9 @@ export default function App() {
                         value={goblinLabTimer.h}
                         onChange={(e) => handleLabTimeChange('goblin', 'h', e.target.value)}
                         placeholder="0"
-                        min="0"
-                        max="24"
-                        className="glass-input goblin-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
+                        className="glass-input goblin-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
                       />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
+                      <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
                         Hours
                       </span>
                     </div>
@@ -7329,18 +8342,14 @@ export default function App() {
                         value={goblinLabTimer.m}
                         onChange={(e) => handleLabTimeChange('goblin', 'm', e.target.value)}
                         placeholder="0"
-                        min="0"
-                        max="60"
-                        className="glass-input goblin-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
+                        className="glass-input goblin-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
                       />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
+                      <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
                         Mins
                       </span>
                     </div>
                   </div>
-
-                  {/* Quick Time Presets for Goblin Lab */}
-                  <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-white/10">
+                  <div className="flex flex-wrap gap-1.5">
                     {[
                       { label: '+6h', d: 0, h: 6 },
                       { label: '+12h', d: 0, h: 12 },
@@ -7353,355 +8362,374 @@ export default function App() {
                         key={preset.label}
                         type="button"
                         onClick={() => applyPresetToLab('goblin', preset.d, preset.h)}
-                        className="tactile text-xs font-bold px-2.5 py-1 rounded-lg border bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 border-emerald-500/30 cursor-pointer"
+                        className="tactile text-[11px] font-bold px-2 py-1 rounded-lg border bg-emerald-500/15 text-emerald-200 border-emerald-500/30 cursor-pointer"
                       >
                         {preset.label}
                       </button>
                     ))}
                   </div>
-
-                  {/* Single Protected Reset / Clear Upgrade Action */}
-                  <div className="pt-2 border-t border-white/10">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        triggerHaptic(15);
-                        setPendingClearSlot('lab_goblin');
-                      }}
-                      className="tactile w-full py-2 px-3 rounded-xl text-xs font-extrabold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <span>🗑️ Reset / Clear Upgrade</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {researchPotions > 0 && displayedLabSavedText && (
-              <div className="bg-fuchsia-500/10 rounded-xl px-3.5 py-2.5 border border-fuchsia-400/35 flex justify-between items-center">
-                <p className="text-[11px] font-extrabold text-[#f0abfc] uppercase tracking-wider">
-                  Preview Research Time Saved
-                </p>
-                <div className="text-sm font-extrabold text-[#f0abfc]">
-                  {displayedLabSavedText}
                 </div>
               </div>
             )}
 
-            {/* Interactive Monthly Cumulative "TOTAL TIME SAVED" Footer Bar (Laboratory ONLY) */}
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic(15);
-                setSummaryModalSection('lab');
-              }}
-              className="tactile w-full bg-black/40 hover:bg-black/55 rounded-2xl p-4 border border-white/10 hover:border-fuchsia-400/40 flex justify-between items-center transition-all cursor-pointer text-left group"
-              title="Click to view Monthly Research Potion Summary"
-            >
-              <div className="flex items-center gap-2">
-                <p className="text-xs font-bold text-gray-200 uppercase tracking-wider group-hover:text-white transition-colors">
-                  Total Time Saved
-                </p>
-                <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-white/10 text-gray-300 group-hover:bg-fuchsia-500/20 group-hover:text-[#f0abfc] transition-colors">
-                  Summary ▸
-                </span>
-              </div>
-              <div className="text-lg font-extrabold text-[#f0abfc]">
-                {formatSavedSeconds(monthlyStats.labSecondsSaved)}
-              </div>
-            </button>
-          </div>
-        )}
-
-        {/* ================================================================= */}
-        {/* TAB 3: PET HOUSE (24x SPEED BOOST ENGINE & INTERACTIVE TIMERS)    */}
-        {/* ================================================================= */}
-        {activeTab === 'pethouse' && (
-          <div key="tab-pethouse" className="tab-panel-fade space-y-4 relative z-10">
-            {/* Dedicated Pet Potion Counter HUD (Compact + Inline Conditional Confirm Button) */}
-            <div className="builder-card accent-pet rounded-2xl p-3.5">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-300">
-                  🐾 Pet Potion Boost HUD
-                </span>
-                <div className="flex items-center gap-1.5">
-                  {petPotions > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        triggerHaptic(15);
-                        setPetPotions(0);
-                      }}
-                      className="tactile text-[11px] font-bold text-gray-300 hover:text-elixir transition cursor-pointer bg-white/10 px-2 py-0.5 rounded-md"
-                    >
-                      Clear
-                    </button>
-                  )}
-                  <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-400/40">
-                    24x Speed Boost
+            {activeTab === 'pethouse' && (
+              <div className="rounded-2xl p-3.5 bg-[#0F131D] border border-[#2A303C] space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-extrabold text-[#4ADE80] uppercase">
+                    [PET] {petTimer.upgradeTitle || 'Active Pet Upgrade'}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(15);
+                      setPendingClearSlot('pet');
+                    }}
+                    className="tactile text-[11px] font-bold text-rose-300 px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 cursor-pointer"
+                  >
+                    🗑️ Clear
+                  </button>
                 </div>
-              </div>
-              <div className="flex items-center justify-between gap-2 bg-black/40 rounded-xl p-1.5 border border-white/10">
-                <button
-                  type="button"
-                  onClick={() => adjustPetPotions(-1)}
-                  className="tactile w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white font-extrabold text-lg flex items-center justify-center border border-white/15 cursor-pointer shrink-0"
-                  aria-label="Decrease Pet Potion"
-                >
-                  −
-                </button>
-                <div className="text-center flex-1 min-w-0">
-                  <div className="text-sm font-extrabold text-[#f8fafc] leading-tight">
-                    {petPotions} {petPotions === 1 ? 'Pet Potion' : 'Pet Potions'}
-                  </div>
-                  <div className="text-[10px] font-bold text-emerald-300/90 leading-tight mt-0.5">
-                    24x Speed Boost (Saves 23h per potion)
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => adjustPetPotions(1)}
-                  className="tactile w-9 h-9 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-extrabold text-lg flex items-center justify-center border border-emerald-400/40 cursor-pointer shrink-0"
-                  aria-label="Increase Pet Potion"
-                >
-                  +
-                </button>
-              </div>
-
-              {/* Conditional Inline Confirm Action Button (Visible ONLY when petPotions > 0) */}
-              {petPotions > 0 && (
-                <button
-                  type="button"
-                  onClick={handlePetPrimaryAction}
-                  className="tactile mt-2.5 w-full font-extrabold text-xs sm:text-sm rounded-xl py-2.5 px-3 tracking-wide cursor-pointer transition-all bg-gradient-to-r from-emerald-500 via-teal-500 to-amber-500 text-white border border-emerald-300/60 shadow-[0_0_20px_rgba(52,211,153,0.35)] flex items-center justify-center gap-1.5"
-                >
-                  <span>
-                    ⚡ Confirm & Activate Boost ({petPotions}{' '}
-                    {petPotions === 1 ? 'Potion' : 'Potions'})
-                  </span>
-                </button>
-              )}
-
-              {/* Active Pet Boost Live Countdown Badge */}
-              <ActiveBoostHudBadge
-                boostEndTime={petBoostEndTime}
-                variant="pethouse"
-                onExpire={handlePetBoostExpire}
-              />
-            </div>
-
-            {/* ============================================================= */}
-            {/* ACTIVE PET HOUSE UPGRADE — DUAL-CARD ARCHITECTURE             */}
-            {/* ============================================================= */}
-            {/* Part A: Live Locked Schedule Card (Pet House) */}
-            <div className="builder-card accent-pet rounded-2xl p-4">
-              <div className="builder-header-sep flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="slot-badge-goblin">[PET]</span>
-                  <span className="upgrade-title">
-                    {petTimer.upgradeTitle || 'Active Pet Upgrade'}
-                  </span>
-                  {typeof petTimer.upgradeLevel === 'number' && (
-                    <span className="lvl-chip-goblin">
-                      LVL {petTimer.upgradeLevel} → LVL {petTimer.upgradeLevel + 1}
+                <div className="grid grid-cols-3 gap-2.5">
+                  <div className="flex flex-col">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      value={petTimer.d}
+                      onChange={(e) => handlePetTimeChange('d', e.target.value)}
+                      placeholder="0"
+                      className="glass-input pet-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
+                    />
+                    <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
+                      Days
                     </span>
-                  )}
-                </div>
-                <span className="text-[10px] font-bold text-emerald-300 uppercase tracking-wider">
-                  Hero Pets
-                </span>
-              </div>
-
-              {targetPetTimestamp && (
-                <div className="flex items-baseline gap-2 mb-3">
-                  <span className="text-[10px] uppercase tracking-wider text-gray-300 font-bold">
-                    {petPotions > 0 ? 'Preview Completes On:' : 'Completes On:'}
-                  </span>
-                  <span className="text-sm sm:text-base font-extrabold text-emerald-300">
-                    {displayedPetDate}
-                  </span>
-                </div>
-              )}
-
-              {/* Live Countdown Digits with Active Boost Indicators */}
-              <div className={targetPetTimestamp ? 'pt-2.5 border-t border-white/10' : ''}>
-                {targetPetTimestamp ? (
-                  <LiveHudTicker
-                    targetTimestamp={targetPetTimestamp}
-                    potionBoostEndTime={petBoostEndTime}
-                    potionSpeedMultiplier={24}
-                    label="Live Countdown"
-                    finishBadgeText="⚡ PET UPGRADE FINISHED! PET READY"
-                    accentColorClass="text-emerald-400"
-                  />
-                ) : (
-                  <HudTickerIdle
-                    label="Live Countdown"
-                    accentUnitColorClass="text-emerald-400"
-                    statusNote="Standby"
-                  />
-                )}
-              </div>
-            </div>
-
-            {/* Part B: Collapsible "Manual Edit / Timers" Section (Pet House) */}
-            <div className="rounded-2xl bg-black/35 border border-white/10 px-3.5 py-2.5">
-              <div
-                role="button"
-                tabIndex={0}
-                aria-expanded={!isPetEditCollapsed}
-                onClick={() => {
-                  triggerHaptic(12);
-                  setIsPetEditCollapsed((prev) => !prev);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    triggerHaptic(12);
-                    setIsPetEditCollapsed((prev) => !prev);
-                  }
-                }}
-                className="tactile w-full flex items-center justify-between gap-2 py-1 rounded-xl cursor-pointer select-none"
-              >
-                <span className="text-xs uppercase tracking-wider text-emerald-300 font-extrabold">
-                  Manual Edit / Pet Timer
-                </span>
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold bg-emerald-500/15 text-emerald-300 border border-emerald-400/35 shadow-sm transition-all">
-                  <span>{isPetEditCollapsed ? '▸ Edit Timer' : '▾ Hide Edit Controls'}</span>
-                </span>
-              </div>
-
-              <div
-                className={`grid transition-all duration-300 ease-in-out ${
-                  isPetEditCollapsed
-                    ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
-                    : 'grid-rows-[1fr] opacity-100 mt-3 pt-3 border-t border-white/10'
-                }`}
-              >
-                <div className="overflow-hidden space-y-3">
-                  {/* Pet Days, Hours, Mins Inputs */}
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="flex flex-col">
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        value={petTimer.d}
-                        onChange={(e) => handlePetTimeChange('d', e.target.value)}
-                        placeholder="0"
-                        min="0"
-                        max="999"
-                        className="glass-input pet-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
-                      />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
-                        Days
-                      </span>
-                    </div>
-                    <div className="flex flex-col">
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        value={petTimer.h}
-                        onChange={(e) => handlePetTimeChange('h', e.target.value)}
-                        placeholder="0"
-                        min="0"
-                        max="24"
-                        className="glass-input pet-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
-                      />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
-                        Hours
-                      </span>
-                    </div>
-                    <div className="flex flex-col">
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        value={petTimer.m}
-                        onChange={(e) => handlePetTimeChange('m', e.target.value)}
-                        placeholder="0"
-                        min="0"
-                        max="60"
-                        className="glass-input pet-input w-full rounded-xl py-2.5 px-2 text-center text-lg font-bold placeholder-gray-500"
-                      />
-                      <span className="text-xs font-semibold text-gray-200 text-center mt-1">
-                        Mins
-                      </span>
-                    </div>
                   </div>
-
-                  {/* Quick Time Presets for Pet House */}
-                  <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-white/10">
-                    {[
-                      { label: '+6h', d: 0, h: 6 },
-                      { label: '+12h', d: 0, h: 12 },
-                      { label: '+1d', d: 1, h: 0 },
-                      { label: '+3d', d: 3, h: 0 },
-                      { label: '+5d', d: 5, h: 0 },
-                      { label: '+7d', d: 7, h: 0 },
-                    ].map((preset) => (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        onClick={() => applyPresetToPet(preset.d, preset.h)}
-                        className="tactile text-xs font-bold px-2.5 py-1 rounded-lg border bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 border-emerald-500/30 cursor-pointer"
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
+                  <div className="flex flex-col">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      value={petTimer.h}
+                      onChange={(e) => handlePetTimeChange('h', e.target.value)}
+                      placeholder="0"
+                      className="glass-input pet-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
+                    />
+                    <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
+                      Hours
+                    </span>
                   </div>
-
-                  {/* Single Protected Reset / Clear Upgrade Action */}
-                  <div className="pt-2 border-t border-white/10">
+                  <div className="flex flex-col">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      value={petTimer.m}
+                      onChange={(e) => handlePetTimeChange('m', e.target.value)}
+                      placeholder="0"
+                      className="glass-input pet-input w-full rounded-xl py-2 px-2 text-center text-base font-bold"
+                    />
+                    <span className="text-[10px] font-semibold text-[#8E9AA8] text-center mt-1">
+                      Mins
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { label: '+6h', d: 0, h: 6 },
+                    { label: '+12h', d: 0, h: 12 },
+                    { label: '+1d', d: 1, h: 0 },
+                    { label: '+3d', d: 3, h: 0 },
+                    { label: '+5d', d: 5, h: 0 },
+                    { label: '+7d', d: 7, h: 0 },
+                  ].map((preset) => (
                     <button
+                      key={preset.label}
                       type="button"
-                      onClick={() => {
-                        triggerHaptic(15);
-                        setPendingClearSlot('pet');
-                      }}
-                      className="tactile w-full py-2 px-3 rounded-xl text-xs font-extrabold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 flex items-center justify-center gap-1.5 cursor-pointer"
+                      onClick={() => applyPresetToPet(preset.d, preset.h)}
+                      className="tactile text-[11px] font-bold px-2 py-1 rounded-lg border bg-emerald-500/15 text-emerald-200 border-emerald-500/30 cursor-pointer"
                     >
-                      <span>🗑️ Reset / Clear Upgrade</span>
+                      {preset.label}
                     </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {petPotions > 0 && displayedPetSavedText && (
-              <div className="bg-emerald-500/10 rounded-xl px-3.5 py-2.5 border border-emerald-400/35 flex justify-between items-center">
-                <p className="text-[11px] font-extrabold text-emerald-300 uppercase tracking-wider">
-                  Preview Pet Time Saved
-                </p>
-                <div className="text-sm font-extrabold text-emerald-300">
-                  {displayedPetSavedText}
+                  ))}
                 </div>
               </div>
             )}
+          </section>
+        )}
 
-            {/* Interactive Monthly Cumulative "TOTAL TIME SAVED" Footer Bar (Pet House ONLY) */}
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic(15);
-                setSummaryModalSection('pethouse');
-              }}
-              className="tactile w-full bg-black/40 hover:bg-black/55 rounded-2xl p-4 border border-white/10 hover:border-emerald-400/40 flex justify-between items-center transition-all cursor-pointer text-left group"
-              title="Click to view Monthly Pet Potion Summary"
-            >
-              <div className="flex items-center gap-2">
-                <p className="text-xs font-bold text-gray-200 uppercase tracking-wider group-hover:text-white transition-colors">
-                  Total Time Saved
-                </p>
-                <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-white/10 text-gray-300 group-hover:bg-emerald-500/20 group-hover:text-emerald-300 transition-colors">
-                  Summary ▸
+        {/* =============================================================== */}
+        {/* UNIFIED UPGRADE QUEUE LIST (BUILDERS | LABORATORY | PETS)       */}
+        {/* =============================================================== */}
+        <div key={animKey} className="space-y-6">
+          {/* 1. BUILDERS QUEUE SECTION */}
+          {(queueFilter === 'all' || queueFilter === 'builders') && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between px-0.5">
+                <span className="text-xs font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase">
+                  BUILDERS
+                </span>
+                <span className="text-xs font-bold text-[#8E9AA8] tabular-nums">
+                  {String(displayedBuilderResults.length).padStart(2, '0')}
                 </span>
               </div>
-              <div className="text-lg font-extrabold text-emerald-300">
-                {formatSavedSeconds(monthlyStats.petSecondsSaved)}
+
+              {displayedBuilderResults.length > 0 ? (
+                <div className="space-y-3">
+                  {displayedBuilderResults.map((item, idx) => {
+                    const previewMatch = builderPreview?.computedResults.find(
+                      (p) => p.builderIndex === item.builderIndex
+                    );
+                    const displayDate =
+                      pendingBuilderPotions > 0 && previewMatch
+                        ? previewMatch.formattedDate
+                        : item.formattedDate;
+                    const isFinishingNext =
+                      displayedBuilderResults.length > 1 &&
+                      soonestTargetTimestamp !== null &&
+                      item.targetTimestamp === soonestTargetTimestamp;
+                    const isHelperAssignedHere =
+                      builderApprentice.assignedSlot === item.builderIndex;
+                    const isApprenticeActiveHere =
+                      isBuilderHelperWorking && isHelperAssignedHere;
+
+                    return (
+                      <LedgerUpgradeQueueCard
+                        key={`${item.builderIndex}-${item.targetTimestamp}-${idx}`}
+                        rawId={item.rawId}
+                        upgradeTitle={item.upgradeTitle}
+                        upgradeLevel={item.upgradeLevel}
+                        slotBadge={item.slotBadge}
+                        isGoblin={item.isGoblin}
+                        isFinishingNext={isFinishingNext}
+                        category="builders"
+                        targetTimestamp={item.targetTimestamp}
+                        displayDate={displayDate}
+                        helper={builderApprentice}
+                        isHelperAssignedToSlot={isHelperAssignedHere}
+                        helperIcon="👷"
+                        helperBoostEndTime={
+                          isApprenticeActiveHere
+                            ? builderHelperCycleNow.activeRemSec > 0
+                              ? nowTick + builderHelperCycleNow.activeRemSec * 1000
+                              : builderApprentice.activeSessionEndTime
+                            : null
+                        }
+                        helperSpeedMultiplier={getHelperSpeedMultiplier(
+                          builderApprentice.level
+                        )}
+                        potionBoostEndTime={builderBoostEndTime}
+                        potionSpeedMultiplier={10}
+                        onActionClick={() => setAssignModalType('builder')}
+                        onFinish={() => handleBuilderUpgradeFinished(item.builderIndex)}
+                      />
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="ledger-queue-card p-5 text-center space-y-2">
+                  <p className="text-sm font-bold text-white">No active builder upgrades</p>
+                  <p className="text-xs text-[#8E9AA8]">
+                    Import your village JSON or tap <span className="text-[#F3CA65] font-bold">+ Add / Edit</span> to set builder timers.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 2. LABORATORY QUEUE SECTION */}
+          {(queueFilter === 'all' || queueFilter === 'lab_pets') && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between px-0.5">
+                <span className="text-xs font-extrabold tracking-[0.16em] text-[#A5B4FC] uppercase">
+                  LABORATORY
+                </span>
+                <span className="text-xs font-bold text-[#8E9AA8] tabular-nums">
+                  {String(activeLabQueueCount).padStart(2, '0')}
+                </span>
               </div>
-            </button>
+
+              {activeLabQueueCount > 0 ? (
+                <div className="space-y-3">
+                  {targetLabTimestamp && (
+                    <LedgerUpgradeQueueCard
+                      rawId={labTimer.rawId}
+                      upgradeTitle={labTimer.upgradeTitle || 'Troop / Spell Upgrade'}
+                      upgradeLevel={labTimer.upgradeLevel}
+                      slotBadge="[LAB]"
+                      isGoblin={false}
+                      category="laboratory"
+                      targetTimestamp={targetLabTimestamp}
+                      displayDate={displayedLabDate}
+                      helper={labApprentice}
+                      isHelperAssignedToSlot={labApprentice.assignedSlot === 'main'}
+                      helperIcon="🔬"
+                      helperBoostEndTime={
+                        isLabHelperWorking && labApprentice.assignedSlot === 'main'
+                          ? labHelperCycleNow.activeRemSec > 0
+                            ? nowTick + labHelperCycleNow.activeRemSec * 1000
+                            : labApprentice.activeSessionEndTime
+                          : null
+                      }
+                      helperSpeedMultiplier={getHelperSpeedMultiplier(labApprentice.level)}
+                      potionBoostEndTime={labBoostEndTime}
+                      potionSpeedMultiplier={24}
+                      onActionClick={() => setAssignModalType('lab')}
+                      onFinish={() => handleLabUpgradeFinished('main')}
+                    />
+                  )}
+
+                  {targetGoblinLabTimestamp && (
+                    <LedgerUpgradeQueueCard
+                      rawId={goblinLabTimer.rawId}
+                      upgradeTitle={goblinLabTimer.upgradeTitle || 'Goblin Researcher'}
+                      upgradeLevel={goblinLabTimer.upgradeLevel}
+                      slotBadge="• GOBLIN"
+                      isGoblin={true}
+                      category="laboratory"
+                      targetTimestamp={targetGoblinLabTimestamp}
+                      displayDate={displayedGoblinLabDate}
+                      helper={labApprentice}
+                      isHelperAssignedToSlot={labApprentice.assignedSlot === 'goblin'}
+                      helperIcon="🔬"
+                      helperBoostEndTime={
+                        isLabHelperWorking && labApprentice.assignedSlot === 'goblin'
+                          ? labHelperCycleNow.activeRemSec > 0
+                            ? nowTick + labHelperCycleNow.activeRemSec * 1000
+                            : labApprentice.activeSessionEndTime
+                          : null
+                      }
+                      helperSpeedMultiplier={getHelperSpeedMultiplier(labApprentice.level)}
+                      potionBoostEndTime={labBoostEndTime}
+                      potionSpeedMultiplier={24}
+                      onActionClick={() => setAssignModalType('lab')}
+                      onFinish={() => handleLabUpgradeFinished('goblin')}
+                    />
+                  )}
+                </div>
+              ) : (
+                <div className="ledger-queue-card p-4 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <UpgradeAssetIcon
+                      rawId="1000007"
+                      upgradeTitle="Laboratory"
+                      category="laboratory"
+                      className="!w-12 !h-12"
+                    />
+                    <div>
+                      <p className="text-sm font-bold text-white">Laboratory Idle</p>
+                      <p className="text-xs text-[#8E9AA8]">No active troop or spell research</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleCategoryTabChange('laboratory');
+                      setTimersCollapsedState(false);
+                    }}
+                    className="tactile text-xs font-bold text-[#F3CA65] px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 cursor-pointer"
+                  >
+                    + Set
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 3. PETS QUEUE SECTION */}
+          {(queueFilter === 'all' || queueFilter === 'lab_pets') && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between px-0.5">
+                <span className="text-xs font-extrabold tracking-[0.16em] text-[#67E8F9] uppercase">
+                  PETS
+                </span>
+                <span className="text-xs font-bold text-[#8E9AA8] tabular-nums">
+                  {String(activePetQueueCount).padStart(2, '0')}
+                </span>
+              </div>
+
+              {targetPetTimestamp ? (
+                <LedgerUpgradeQueueCard
+                  rawId={petTimer.rawId}
+                  upgradeTitle={petTimer.upgradeTitle || 'Active Pet Upgrade'}
+                  upgradeLevel={petTimer.upgradeLevel}
+                  slotBadge="[PET]"
+                  isGoblin={false}
+                  category="pethouse"
+                  targetTimestamp={targetPetTimestamp}
+                  displayDate={displayedPetDate}
+                  potionBoostEndTime={petBoostEndTime}
+                  potionSpeedMultiplier={24}
+                  onActionClick={() => {
+                    setIsBoostDrawerOpen(true);
+                    handleCategoryTabChange('pethouse');
+                  }}
+                />
+              ) : (
+                <div className="ledger-queue-card p-4 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <UpgradeAssetIcon
+                      rawId="1000068"
+                      upgradeTitle="Pet House"
+                      category="pethouse"
+                      className="!w-12 !h-12"
+                    />
+                    <div>
+                      <p className="text-sm font-bold text-white">Pet House Idle</p>
+                      <p className="text-xs text-[#8E9AA8]">No active hero pet upgrade</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleCategoryTabChange('pethouse');
+                      setTimersCollapsedState(false);
+                    }}
+                    className="tactile text-xs font-bold text-[#F3CA65] px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 cursor-pointer"
+                  >
+                    + Set
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* =============================================================== */}
+        {/* BOTTOM ACTION CARD ("Village Monthly Progress")                 */}
+        {/* =============================================================== */}
+        <button
+          type="button"
+          onClick={() => {
+            triggerHaptic(15);
+            setSummaryModalSection('builders');
+          }}
+          className="tactile w-full ledger-queue-card p-4 sm:p-5 flex items-center justify-between gap-3 text-left cursor-pointer hover:border-[#F3CA65]/40 transition-all"
+        >
+          <div className="flex items-center gap-3.5 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] flex items-center justify-center text-[#F3CA65] shrink-0">
+              <svg
+                className="w-5 h-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                <rect x="14" y="14" width="7" height="7" rx="1.5" />
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <h4 className="text-base sm:text-lg font-black text-white leading-snug truncate">
+                Village Monthly Progress
+              </h4>
+              <p className="text-xs font-medium text-[#8E9AA8] truncate">
+                View upgrades completed and time saved this month
+              </p>
+            </div>
           </div>
-        )}
+          <span className="text-[#F3CA65] font-extrabold text-base shrink-0">→</span>
+        </button>
       </div>
 
       {/* =================================================================== */}
@@ -8455,7 +9483,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Section-Specific Interactive Monthly Potion Summary Modal */}
+      {/* Comprehensive Monthly Progress Modal ("VILLAGE STATS - [MONTH NAME]") */}
       {summaryModalSection !== null && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
@@ -8465,28 +9493,30 @@ export default function App() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="monthly-summary-title"
-            className="w-full max-w-sm rounded-3xl p-6 bg-[#090d16] border border-amber-400/40 shadow-[0_0_45px_rgba(0,0,0,0.95)] space-y-4 relative overflow-hidden"
+            className="w-full max-w-md rounded-3xl p-5 sm:p-6 bg-[#0F131D] border border-[#2A303C] shadow-[0_0_50px_rgba(0,0,0,0.95)] space-y-4 relative overflow-hidden max-h-[88dvh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-lg">
-                  {summaryModalSection === 'builders'
-                    ? '🔨'
-                    : summaryModalSection === 'lab'
-                    ? '⚗️'
-                    : '🐾'}
-                </span>
+            {/* Header: VILLAGE STATS - [MONTH NAME] */}
+            <div className="flex items-center justify-between gap-2 shrink-0">
+              <div>
                 <h2
                   id="monthly-summary-title"
-                  className="text-base sm:text-lg font-extrabold text-[#f8fafc]"
+                  className="text-base sm:text-lg font-black tracking-wide text-white uppercase"
                 >
-                  {summaryModalSection === 'builders'
-                    ? 'Monthly Builder Potion Summary'
-                    : summaryModalSection === 'lab'
-                    ? 'Monthly Research Potion Summary'
-                    : 'Monthly Pet Potion Summary'}
+                  VILLAGE STATS -{' '}
+                  <span className="text-[#F3CA65]">
+                    {new Date(nowTick)
+                      .toLocaleString('en-US', { month: 'long' })
+                      .toUpperCase()}
+                  </span>
                 </h2>
+                <p className="text-[11px] font-bold text-[#8E9AA8] mt-0.5">
+                  {activeAccountProfile.name}{' '}
+                  {activePlayerTag ? (
+                    <span className="font-mono text-[#4ADE80]">({activePlayerTag})</span>
+                  ) : null}{' '}
+                  · {getCurrentMonthDateRangeLabel(new Date(nowTick))}
+                </p>
               </div>
               <button
                 type="button"
@@ -8494,106 +9524,189 @@ export default function App() {
                   triggerHaptic(12);
                   setSummaryModalSection(null);
                 }}
-                className="tactile text-gray-400 hover:text-white text-sm font-bold px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
+                className="tactile text-[#8E9AA8] hover:text-white text-sm font-bold px-2.5 py-1.5 rounded-xl bg-[#161B26] border border-[#2A303C] cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            <div className="rounded-2xl p-4 bg-white/5 border border-white/10 space-y-3">
-              {/* Account Context: {AccountName} ({playerTag}) */}
-              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/10">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                  Village
+            {/* Scrollable Body (Top: Potion Analytics + Middle: Upgrades List) */}
+            <div className="overflow-y-auto space-y-4 pr-0.5 flex-1">
+              {/* Top Section: Potion Analytics (3-Row Categorized List) */}
+              <div className="space-y-2">
+                <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase px-0.5 block">
+                  POTION ANALYTICS
                 </span>
-                <span className="text-xs sm:text-sm font-extrabold text-[#fbbf24]">
-                  {activeAccountProfile.name}{' '}
-                  <span className="font-mono text-emerald-300">
-                    ({activePlayerTag || 'Unbound'})
+
+                <div className="space-y-2">
+                  {/* Row 1: Builder Potions */}
+                  <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                        <img
+                          src="/icons/art_builder_potion.webp"
+                          alt="Builder Potion"
+                          className="w-full h-full object-contain"
+                          onError={(e) => {
+                            (e.currentTarget as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                          Builder Potions Used:{' '}
+                          <span className="text-[#F3CA65] font-extrabold">
+                            {monthlyHistory.potions.builder.used}
+                          </span>
+                        </p>
+                        <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                          Time Saved:{' '}
+                          <span className="text-[#4ADE80] font-bold">
+                            {formatCumulativeModalTime(
+                              monthlyHistory.potions.builder.timeSavedMinutes * 60
+                            )}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Row 2: Research Potions */}
+                  <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                        <img
+                          src="/icons/art_research_potion.webp"
+                          alt="Research Potion"
+                          className="w-full h-full object-contain"
+                          onError={(e) => {
+                            (e.currentTarget as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                          Research Potions Used:{' '}
+                          <span className="text-[#F3CA65] font-extrabold">
+                            {monthlyHistory.potions.research.used}
+                          </span>
+                        </p>
+                        <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                          Time Saved:{' '}
+                          <span className="text-[#93C5FD] font-bold">
+                            {formatCumulativeModalTime(
+                              monthlyHistory.potions.research.timeSavedMinutes * 60
+                            )}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Row 3: Pet Potions */}
+                  <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                        <img
+                          src="/icons/art_pet_potion.webp"
+                          alt="Pet Potion"
+                          className="w-full h-full object-contain"
+                          onError={(e) => {
+                            (e.currentTarget as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                          Pet Potions Used:{' '}
+                          <span className="text-[#F3CA65] font-extrabold">
+                            {monthlyHistory.potions.pet.used}
+                          </span>
+                        </p>
+                        <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                          Time Saved:{' '}
+                          <span className="text-[#4ADE80] font-bold">
+                            {formatCumulativeModalTime(
+                              monthlyHistory.potions.pet.timeSavedMinutes * 60
+                            )}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Middle Section: The Upgrades List */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between px-0.5">
+                  <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase">
+                    UPGRADES COMPLETED THIS MONTH
                   </span>
-                </span>
-              </div>
+                  <span className="text-[11px] font-bold text-[#8E9AA8] tabular-nums">
+                    {
+                      Object.values(monthlyHistory.upgrades).filter(
+                        (u) => u.currentLevel > u.startLevel
+                      ).length
+                    }
+                  </span>
+                </div>
 
-              {/* Time Frame: Dynamic range of current month */}
-              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/10">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                  Time Frame
-                </span>
-                <span className="text-xs sm:text-sm font-extrabold text-white">
-                  {getCurrentMonthDateRangeLabel(new Date(nowTick))}
-                </span>
-              </div>
-
-              {/* Section-Specific Total Potions Used */}
-              <div className="pt-0.5">
-                {summaryModalSection === 'builders' && (
-                  <p className="text-xs sm:text-sm font-extrabold text-gray-200">
-                    Total Builder Potions used:{' '}
-                    <span className="text-[#fbbf24] text-base">
-                      {monthlyStats.builderPotionsCount}
-                    </span>
-                  </p>
-                )}
-                {summaryModalSection === 'lab' && (
-                  <p className="text-xs sm:text-sm font-extrabold text-gray-200">
-                    Total Research Potions used:{' '}
-                    <span className="text-[#f0abfc] text-base">
-                      {monthlyStats.researchPotionsCount}
-                    </span>
-                  </p>
-                )}
-                {summaryModalSection === 'pethouse' && (
-                  <p className="text-xs sm:text-sm font-extrabold text-gray-200">
-                    Total Pet Potions used:{' '}
-                    <span className="text-emerald-300 text-base">
-                      {monthlyStats.petPotionsCount}
-                    </span>
-                  </p>
-                )}
-              </div>
-
-              {/* Section-Specific Total Time Saved */}
-              <div className="rounded-xl p-3 bg-black/50 border border-white/10">
-                {summaryModalSection === 'builders' && (
-                  <p className="text-xs sm:text-sm font-extrabold text-gray-200">
-                    Total Builder Time Saved:{' '}
-                    <span className="text-elixir text-base">
-                      {formatCumulativeModalTime(monthlyStats.builderSecondsSaved)}
-                    </span>
-                  </p>
-                )}
-                {summaryModalSection === 'lab' && (
-                  <p className="text-xs sm:text-sm font-extrabold text-gray-200">
-                    Total Research Time Saved:{' '}
-                    <span className="text-[#f0abfc] text-base">
-                      {formatCumulativeModalTime(monthlyStats.labSecondsSaved)}
-                    </span>
-                  </p>
-                )}
-                {summaryModalSection === 'pethouse' && (
-                  <p className="text-xs sm:text-sm font-extrabold text-gray-200">
-                    Total Pet Time Saved:{' '}
-                    <span className="text-emerald-300 text-base">
-                      {formatCumulativeModalTime(monthlyStats.petSecondsSaved)}
-                    </span>
-                  </p>
+                {Object.entries(monthlyHistory.upgrades).filter(
+                  ([, u]) => u.currentLevel > u.startLevel
+                ).length > 0 ? (
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-0.5">
+                    {Object.entries(monthlyHistory.upgrades)
+                      .filter(([, u]) => u.currentLevel > u.startLevel)
+                      .map(([itemId, entry]) => (
+                        <div
+                          key={itemId}
+                          className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <UpgradeAssetIcon
+                              rawId={itemId}
+                              upgradeTitle={entry.name}
+                              upgradeLevel={entry.currentLevel}
+                              className="!w-12 !h-12"
+                            />
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-white truncate">
+                                {entry.name}
+                              </p>
+                              <p className="text-xs font-bold text-[#F3CA65]/90 mt-0.5">
+                                Lvl {entry.startLevel} →{' '}
+                                <span className="text-[#4ADE80]">{entry.currentLevel}</span>
+                              </p>
+                            </div>
+                          </div>
+                          <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-lg bg-[#4ADE80]/15 text-[#4ADE80] border border-[#4ADE80]/30 shrink-0">
+                            +{entry.currentLevel - entry.startLevel}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl p-4 bg-[#161B26] border border-[#2A303C] text-center space-y-1">
+                    <p className="text-xs font-bold text-white">
+                      No level increases logged yet this month
+                    </p>
+                    <p className="text-[11px] text-[#8E9AA8] leading-relaxed">
+                      Import your village JSON periodically to automatically compare and track buildings, heroes, troops, spells, and pets upgraded this month.
+                    </p>
+                  </div>
                 )}
               </div>
-
-              {!activePlayerTag && (
-                <p className="text-[11px] font-semibold text-amber-300/90 leading-relaxed pt-1">
-                  Import your village JSON once to lock your Player Tag and activate monthly potion tracking for this account.
-                </p>
-              )}
             </div>
 
+            {/* Bottom: Gold Close Button (#F3CA65) */}
             <button
               type="button"
               onClick={() => {
                 triggerHaptic(15);
                 setSummaryModalSection(null);
               }}
-              className="btn-calculate tactile w-full py-2.5 rounded-xl font-extrabold text-xs sm:text-sm text-white shadow-lg cursor-pointer"
+              className="tactile w-full py-3 rounded-2xl font-extrabold text-sm bg-[#F3CA65] hover:bg-[#E5BA53] text-[#0B0E14] shadow-[0_6px_20px_rgba(243,202,101,0.22)] cursor-pointer shrink-0 transition-all"
             >
               Close
             </button>

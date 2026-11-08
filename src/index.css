@@ -8,10 +8,8 @@ body,
 }
 
 body {
-  font-family: 'Poppins', sans-serif;
-  /* Dark blue/purple gradient matching Clash of Clans night village / magic theme */
-  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-  background-attachment: fixed;
+  font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: #0B0E14;
   color: #ffffff;
   margin: 0;
   overscroll-behavior-y: contain;
@@ -22,56 +20,84 @@ body {
   min-height: 100vh;
   min-height: 100dvh;
   padding-top: max(16px, env(safe-area-inset-top));
-  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
   padding-left: max(12px, env(safe-area-inset-left));
   padding-right: max(12px, env(safe-area-inset-right));
 }
 
-/* Glassmorphism styling */
+/* Clash Ledger Native Surface Tokens */
+.ledger-shell {
+  background-color: #0B0E14;
+}
+
+.ledger-hero-card {
+  background: radial-gradient(120% 120% at 88% 22%, rgba(44, 68, 78, 0.48) 0%, rgba(22, 29, 43, 0.96) 55%, #141923 100%);
+  border: 1px solid #2A3444;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+}
+
+.ledger-stat-card {
+  background: #141923;
+  border: 1px solid #262E3D;
+}
+
+.ledger-boost-card {
+  background: linear-gradient(135deg, #241934 0%, #1B162A 55%, #151A25 100%);
+  border: 1px solid #3A2C4E;
+}
+
+.ledger-queue-card {
+  background: #161B26;
+  border: 1px solid #2A303C;
+  border-radius: 20px;
+}
+
+/* Glassmorphism & Legacy Surface Compatibility */
 .glass-card {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  background: #0F131D;
+  border: 1px solid #222834;
 }
 
 .glass-input {
-  background: rgba(0, 0, 0, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #11151F;
+  border: 1px solid #2A303C;
   color: white;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
 }
 
 .glass-input:focus {
   outline: none;
-  border-color: #FACC15; /* Gold focus */
-  box-shadow: 0 0 10px rgba(250, 204, 21, 0.3);
-  background: rgba(0, 0, 0, 0.4);
+  border-color: #F3CA65;
+  box-shadow: 0 0 0 2px rgba(243, 202, 101, 0.2);
+  background: #0B0E14;
 }
 
 /* CoC Accent Colors */
 .text-gold {
-  color: #FACC15;
+  color: #F3CA65;
 }
 .text-elixir {
   color: #EC4899;
 }
 .bg-gold {
-  background-color: #FACC15;
+  background-color: #F3CA65;
 }
 .bg-elixir {
   background-color: #EC4899;
 }
 
-/* Custom Button */
+/* Primary Gold CTA Button */
 .btn-calculate {
-  background: linear-gradient(to right, #EC4899, #8B5CF6);
-  box-shadow: 0 4px 15px rgba(236, 72, 153, 0.4);
-  transition: transform 0.1s, box-shadow 0.3s;
+  background: linear-gradient(180deg, #F3CA65 0%, #DFB44B 100%);
+  color: #0B0E14 !important;
+  box-shadow: 0 4px 14px rgba(243, 202, 101, 0.22);
+  transition: transform 0.12s ease, filter 0.2s ease;
+}
+.btn-calculate:hover {
+  filter: brightness(1.05);
 }
 .btn-calculate:active {
-  transform: scale(0.97);
+  transform: scale(0.98);
 }
 
 /* Animations */
@@ -82,17 +108,17 @@ body {
 
 .show-result {
   display: block;
-  animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: slideUpFade 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @keyframes slideUpFade {
   0% {
     opacity: 0;
-    transform: translateY(30px) scale(0.95);
+    transform: translateY(10px);
   }
   100% {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
   }
 }
 
@@ -110,142 +136,121 @@ input[type="number"] {
 .tactile,
 .glass-input,
 .btn-calculate {
-  transition: transform 0.15s ease, border-color 0.25s ease, box-shadow 0.25s ease, background-color 0.2s ease;
+  transition: transform 0.14s ease, border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
 }
 
 .tactile:active,
 .glass-input:active,
 .btn-calculate:active {
-  transform: scale(0.96);
+  transform: scale(0.97);
 }
 
-/* Regular Builder Card */
+/* Builder & Helper Cards */
 .builder-card {
-  background: rgba(15, 23, 42, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-  transition: transform 0.15s ease, border-color 0.25s ease;
+  background: #161B26;
+  border: 1px solid #2A303C;
+  transition: transform 0.15s ease, border-color 0.2s ease;
 }
 
-/* Dedicated Goblin Builder Card (Builder 7) */
 .goblin-card {
-  background: linear-gradient(145deg, rgba(6, 78, 59, 0.35) 0%, rgba(15, 23, 42, 0.6) 100%);
-  border: 1px solid rgba(34, 197, 94, 0.4);
-  box-shadow: 0 0 20px rgba(34, 197, 94, 0.15), inset 0 0 12px rgba(34, 197, 94, 0.08);
-  transition: transform 0.15s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+  background: #161B26;
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  transition: transform 0.15s ease, border-color 0.2s ease;
 }
 
 .goblin-input:focus {
   outline: none;
-  border-color: #22c55e !important;
-  box-shadow: 0 0 12px rgba(34, 197, 94, 0.4) !important;
-  background: rgba(0, 0, 0, 0.45);
+  border-color: #4ADE80 !important;
+  box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.2) !important;
+  background: #0B0E14;
 }
 
-/* Minimalist High-Contrast Builder Card Header Styles */
+/* Pill / Capsule Badges for Builders & Categories */
 .slot-badge-regular {
-  color: #fbbf24;
-  background: rgba(251, 191, 36, 0.12);
-  border: 1px solid rgba(251, 191, 36, 0.3);
+  color: #F3CA65;
+  background: rgba(243, 202, 101, 0.14);
+  border: 1px solid rgba(243, 202, 101, 0.32);
   border-radius: 6px;
   padding: 2px 7px;
   font-weight: 800;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   line-height: 1.25;
 }
 
 .slot-badge-hero {
-  color: #e879f9;
-  background: rgba(217, 70, 239, 0.14);
-  border: 1px solid rgba(217, 70, 239, 0.4);
+  color: #C4B5FD;
+  background: rgba(167, 139, 250, 0.14);
+  border: 1px solid rgba(167, 139, 250, 0.35);
   border-radius: 6px;
   padding: 2px 7px;
   font-weight: 800;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   line-height: 1.25;
 }
 
 .slot-badge-goblin {
-  color: #22c55e;
-  background: rgba(34, 197, 94, 0.12);
-  border: 1px solid rgba(34, 197, 94, 0.4);
+  color: #4ADE80;
+  background: rgba(74, 222, 128, 0.14);
+  border: 1px solid rgba(74, 222, 128, 0.35);
   border-radius: 6px;
   padding: 2px 7px;
   font-weight: 800;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   line-height: 1.25;
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.2);
 }
 
 .upgrade-title {
   color: #ffffff;
   font-weight: 700;
   font-size: 1.05rem;
-  letter-spacing: 0.25px;
+  letter-spacing: 0.1px;
   line-height: 1.3;
 }
 
 .lvl-chip {
-  background: rgba(251, 191, 36, 0.1);
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  color: #fbbf24;
+  background: rgba(243, 202, 101, 0.12);
+  border: 1px solid rgba(243, 202, 101, 0.3);
+  color: #F3CA65;
   font-weight: 800;
-  font-size: 0.72rem;
-  letter-spacing: 0.5px;
+  font-size: 0.7rem;
+  letter-spacing: 0.4px;
   border-radius: 6px;
   padding: 2px 7px;
   line-height: 1.25;
 }
 
 .lvl-chip-goblin {
-  background: rgba(34, 197, 94, 0.12);
-  border: 1px solid rgba(34, 197, 94, 0.4);
-  color: #22c55e;
+  background: rgba(74, 222, 128, 0.12);
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  color: #4ADE80;
   font-weight: 800;
-  font-size: 0.72rem;
-  letter-spacing: 0.5px;
+  font-size: 0.7rem;
+  letter-spacing: 0.4px;
   border-radius: 6px;
   padding: 2px 7px;
   line-height: 1.25;
 }
 
-/* Dynamic Category Accent Left Borders */
 .accent-gold {
-  border-left: 3px solid #fbbf24 !important;
+  border-color: #2A303C;
 }
 
 .accent-hero {
-  border-left: 3px solid #d946ef !important;
+  border-color: #2A303C;
 }
 
 .accent-pet {
-  border-left: 3px solid #10b981 !important;
+  border-color: #2A303C;
 }
 
 .accent-goblin {
-  border-left: 3px solid #22c55e !important;
-  box-shadow: -2px 0 8px rgba(34, 197, 94, 0.3), 0 0 20px rgba(34, 197, 94, 0.15), inset 0 0 12px rgba(34, 197, 94, 0.08) !important;
+  border-color: rgba(74, 222, 128, 0.35);
 }
 
 .builder-header-sep {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid #242B38;
   padding-bottom: 8px;
   margin-bottom: 12px;
-}
-
-/* Clash Planner Branding & Navigation Styles */
-.text-planner-gradient {
-  background: linear-gradient(90deg, #ec4899 0%, #fbbf24 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.tagline-companion {
-  color: #fbbf24;
-  letter-spacing: 0.25rem;
-  font-size: 0.75rem;
-  font-weight: 700;
 }
 
 .account-bar-scroll {
@@ -258,79 +263,45 @@ input[type="number"] {
 }
 
 .account-chip-active {
-  border: 1px solid #fbbf24;
-  background: rgba(251, 191, 36, 0.1);
-  color: #fbbf24;
-  box-shadow: 0 0 12px rgba(251, 191, 36, 0.2);
+  border: 1px solid #F3CA65;
+  background: rgba(243, 202, 101, 0.14);
+  color: #F3CA65;
 }
 
 .account-chip-inactive {
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(15, 23, 42, 0.45);
-  color: #94a3b8;
+  border: 1px solid #2A303C;
+  background: #121722;
+  color: #8E9AA8;
 }
 
 .account-chip-add {
-  border: 1px dashed rgba(255, 255, 255, 0.28);
+  border: 1px dashed #364152;
   background: rgba(255, 255, 255, 0.03);
-  color: #cbd5e1;
-}
-
-.seg-tab-builders-active {
-  border: 1px solid #fbbf24;
-  background: rgba(251, 191, 36, 0.14);
-  color: #fbbf24;
-  box-shadow: 0 0 14px rgba(251, 191, 36, 0.22);
-}
-
-.seg-tab-lab-active {
-  border: 1px solid #d946ef;
-  background: rgba(217, 70, 239, 0.15);
-  color: #f0abfc;
-  box-shadow: 0 0 14px rgba(217, 70, 239, 0.25);
-}
-
-.seg-tab-pet-active {
-  border: 1px solid #10b981;
-  background: rgba(16, 185, 129, 0.15);
-  color: #34d399;
-  box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
+  color: #CBD5E1;
 }
 
 .tab-panel-fade {
-  animation: tabFadeSlide 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-.builder-speed-pill {
-  background: rgba(251, 191, 36, 0.1);
-  color: #fbbf24;
-  border: 1px solid rgba(251, 191, 36, 0.3);
-  border-radius: 6px;
-  padding: 2px 8px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
+  animation: tabFadeSlide 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .lab-input:focus {
   outline: none;
-  border-color: #d946ef !important;
-  box-shadow: 0 0 12px rgba(217, 70, 239, 0.4) !important;
-  background: rgba(0, 0, 0, 0.45);
+  border-color: #A78BFA !important;
+  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.25) !important;
+  background: #0B0E14;
 }
 
 .pet-input:focus {
   outline: none;
-  border-color: #10b981 !important;
-  box-shadow: 0 0 12px rgba(16, 185, 129, 0.4) !important;
-  background: rgba(0, 0, 0, 0.45);
+  border-color: #38BDF8 !important;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25) !important;
+  background: #0B0E14;
 }
 
 @keyframes tabFadeSlide {
   0% {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px);
   }
   100% {
     opacity: 1;
@@ -340,22 +311,20 @@ input[type="number"] {
 
 /* 4-Unit HUD Live Countdown Ticker & Tiered Animations */
 .hud-unit {
-  background: rgba(2, 6, 23, 0.65);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5);
+  background: #11151F;
+  border: 1px solid #262E3D;
   font-variant-numeric: tabular-nums;
-  will-change: transform, box-shadow, opacity;
+  will-change: transform, opacity;
 }
 
-/* Seconds: Smooth vertical slide-down flip */
 .anim-sec-flip {
-  animation: secSlideFlip 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: secSlideFlip 0.25s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
 @keyframes secSlideFlip {
   0% {
-    transform: translateY(-4px);
-    opacity: 0.8;
+    transform: translateY(-3px);
+    opacity: 0.82;
   }
   100% {
     transform: translateY(0);
@@ -363,9 +332,8 @@ input[type="number"] {
   }
 }
 
-/* Minutes: Subtle neon pink/elixir pulse glow + gentle bounce */
 .anim-min-pulse {
-  animation: minElixirPulse 0.48s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation: minElixirPulse 0.42s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 
 @keyframes minElixirPulse {
@@ -373,20 +341,17 @@ input[type="number"] {
     transform: scale(1);
   }
   40% {
-    transform: scale(1.08);
-    border-color: rgba(236, 72, 153, 0.85);
-    box-shadow: 0 0 12px rgba(236, 72, 153, 0.55), inset 0 0 8px rgba(236, 72, 153, 0.25);
+    transform: scale(1.04);
+    border-color: rgba(243, 202, 101, 0.7);
   }
   100% {
     transform: scale(1);
-    border-color: rgba(255, 255, 255, 0.14);
-    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5);
+    border-color: #262E3D;
   }
 }
 
-/* Hours & Days: Prominent gold glow flash + scale pop */
 .anim-milestone-gold {
-  animation: milestoneGoldFlash 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: milestoneGoldFlash 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
 @keyframes milestoneGoldFlash {
@@ -394,29 +359,25 @@ input[type="number"] {
     transform: scale(1);
   }
   35% {
-    transform: scale(1.12);
-    border-color: rgba(251, 191, 36, 0.95);
-    box-shadow: 0 0 12px rgba(251, 191, 36, 0.6), inset 0 0 10px rgba(251, 191, 36, 0.3);
+    transform: scale(1.06);
+    border-color: rgba(243, 202, 101, 0.9);
   }
   100% {
     transform: scale(1);
-    border-color: rgba(255, 255, 255, 0.14);
-    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5);
+    border-color: #262E3D;
   }
 }
 
-/* Finished Badge Entrance & Glow */
 .badge-finished-glow {
-  background: linear-gradient(90deg, rgba(16, 185, 129, 0.22) 0%, rgba(34, 197, 94, 0.32) 100%);
-  border: 1px solid rgba(34, 197, 94, 0.6);
-  box-shadow: 0 0 16px rgba(34, 197, 94, 0.35), inset 0 0 8px rgba(34, 197, 94, 0.15);
-  animation: finishedPopIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  background: rgba(74, 222, 128, 0.14);
+  border: 1px solid rgba(74, 222, 128, 0.45);
+  animation: finishedPopIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @keyframes finishedPopIn {
   0% {
     opacity: 0;
-    transform: scale(0.92);
+    transform: scale(0.95);
   }
   100% {
     opacity: 1;
@@ -424,13 +385,12 @@ input[type="number"] {
   }
 }
 
-/* Subtle Green Glowing Dot Indicator for Active Apprentice Session */
 .helper-pulse-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #10b981;
-  box-shadow: 0 0 8px #10b981;
+  background: #4ADE80;
+  box-shadow: 0 0 8px #4ADE80;
   display: inline-block;
   animation: pulse 2s infinite;
   flex-shrink: 0;
@@ -440,15 +400,9 @@ input[type="number"] {
   0%, 100% {
     opacity: 1;
     transform: scale(1);
-    box-shadow: 0 0 8px #10b981;
   }
   50% {
     opacity: 0.45;
     transform: scale(0.88);
-    box-shadow: 0 0 14px #10b981;
   }
 }
-
-
-
-
