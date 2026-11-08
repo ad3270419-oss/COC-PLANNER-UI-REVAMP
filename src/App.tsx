@@ -359,28 +359,20 @@ function createEmptyVillageMonthlyHistory(): VillageMonthlyHistory {
   };
 }
 
-function getVillageHistoryStorageKey(yearMonthKey = getCurrentYearMonthKey()): string {
-  return `village_history_${yearMonthKey}`;
-}
-
 function getScopedVillageHistoryStorageKey(
   playerTag: string | undefined | null,
   yearMonthKey = getCurrentYearMonthKey()
-): string {
+): string | null {
   const cleanedTag = playerTag?.trim().toUpperCase();
-  return cleanedTag
-    ? `village_history_${yearMonthKey}_${cleanedTag}`
-    : getVillageHistoryStorageKey(yearMonthKey);
+  return cleanedTag ? `village_history_${yearMonthKey}_${cleanedTag}` : null;
 }
 
 function getVillageBaselineStorageKey(
   playerTag: string | undefined | null,
   yearMonthKey = getCurrentYearMonthKey()
-): string {
+): string | null {
   const cleanedTag = playerTag?.trim().toUpperCase();
-  return cleanedTag
-    ? `village_baseline_${yearMonthKey}_${cleanedTag}`
-    : `village_baseline_${yearMonthKey}`;
+  return cleanedTag ? `village_baseline_${yearMonthKey}_${cleanedTag}` : null;
 }
 
 function hasVillageBaselineInStorage(
@@ -389,6 +381,7 @@ function hasVillageBaselineInStorage(
 ): boolean {
   try {
     const baselineKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+    if (!baselineKey) return false;
     const raw = localStorage.getItem(baselineKey);
     if (!raw) return false;
     const parsed = JSON.parse(raw);
@@ -475,19 +468,19 @@ function saveVillageMonthlyHistory(
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
 ): void {
+  const scopedKey = getScopedVillageHistoryStorageKey(playerTag, yearMonthKey);
+  if (!scopedKey) {
+    return;
+  }
   const payload = JSON.stringify({
     potions: history.potions,
     upgrades: history.upgrades,
   });
   try {
-    // Write to both the scoped key village_history_${YYYY_MM}_${PLAYER_TAG} and canonical village_history_${YYYY_MM}
-    localStorage.setItem(getVillageHistoryStorageKey(yearMonthKey), payload);
-    if (playerTag && playerTag.trim()) {
-      localStorage.setItem(
-        getScopedVillageHistoryStorageKey(playerTag, yearMonthKey),
-        payload
-      );
-    }
+    // Remove any legacy un-scoped global key so data can never bleed across accounts
+    localStorage.removeItem(`village_history_${yearMonthKey}`);
+    // Save strictly to `village_history_${YYYY_MM}_${activePlayerTag}`
+    localStorage.setItem(scopedKey, payload);
   } catch {
     // Ignore storage quota errors
   }
@@ -497,17 +490,15 @@ function loadVillageMonthlyHistory(
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
 ): VillageMonthlyHistory {
+  const scopedKey = getScopedVillageHistoryStorageKey(playerTag, yearMonthKey);
+  if (!scopedKey) {
+    return createEmptyVillageMonthlyHistory();
+  }
+
   let history = createEmptyVillageMonthlyHistory();
   try {
-    const scopedKey = getScopedVillageHistoryStorageKey(playerTag, yearMonthKey);
-    const legacyScopedKey = playerTag?.trim()
-      ? `village_history_${playerTag.trim().toUpperCase()}_${yearMonthKey}`
-      : null;
-    const defaultKey = getVillageHistoryStorageKey(yearMonthKey);
-    const raw =
-      (playerTag?.trim() ? localStorage.getItem(scopedKey) : null) ||
-      (legacyScopedKey ? localStorage.getItem(legacyScopedKey) : null) ||
-      localStorage.getItem(defaultKey);
+    // Read strictly from `village_history_${YYYY_MM}_${activePlayerTag}` (never fall back to a global key)
+    const raw = localStorage.getItem(scopedKey);
     if (raw) {
       history = normalizeVillageMonthlyHistory(JSON.parse(raw));
     }
@@ -523,38 +514,6 @@ function loadVillageMonthlyHistory(
     };
   }
 
-  // Merge any existing legacy clash_stats_* potion counts so manual potion usage is always preserved
-  if (playerTag?.trim()) {
-    const legacy = loadMonthlyStatsForTag(playerTag, yearMonthKey);
-    const mergedBuilderUsed = Math.max(history.potions.builder.used, legacy.builderPotionsCount);
-    const mergedBuilderMins = Math.max(
-      history.potions.builder.timeSavedMinutes,
-      Math.round(legacy.builderSecondsSaved / 60)
-    );
-    const mergedResearchUsed = Math.max(
-      history.potions.research.used,
-      legacy.researchPotionsCount
-    );
-    const mergedResearchMins = Math.max(
-      history.potions.research.timeSavedMinutes,
-      Math.round(legacy.labSecondsSaved / 60)
-    );
-    const mergedPetUsed = Math.max(history.potions.pet.used, legacy.petPotionsCount);
-    const mergedPetMins = Math.max(
-      history.potions.pet.timeSavedMinutes,
-      Math.round(legacy.petSecondsSaved / 60)
-    );
-    history = {
-      ...history,
-      potions: {
-        builder: { used: mergedBuilderUsed, timeSavedMinutes: mergedBuilderMins },
-        research: { used: mergedResearchUsed, timeSavedMinutes: mergedResearchMins },
-        pet: { used: mergedPetUsed, timeSavedMinutes: mergedPetMins },
-      },
-    };
-  }
-
-  saveVillageMonthlyHistory(history, playerTag, yearMonthKey);
   return history;
 }
 
@@ -564,6 +523,7 @@ function loadVillageBaselineLevels(
 ): Record<string, number> | null {
   try {
     const baselineKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+    if (!baselineKey) return null;
     const raw = localStorage.getItem(baselineKey);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
@@ -585,13 +545,12 @@ function saveVillageBaselineLevels(
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
 ): void {
+  const baselineKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+  if (!baselineKey) return;
   const payload = JSON.stringify(baseline);
   try {
-    const baselineKey = getVillageBaselineStorageKey(playerTag, yearMonthKey);
+    localStorage.removeItem(`village_baseline_${yearMonthKey}`);
     localStorage.setItem(baselineKey, payload);
-    if (playerTag?.trim()) {
-      localStorage.setItem(getVillageBaselineStorageKey(null, yearMonthKey), payload);
-    }
   } catch {
     // Ignore storage quota errors
   }
@@ -4008,9 +3967,12 @@ export default function App() {
   const activePlayerTag = activeAccountProfile?.tag?.trim() || '';
   const activeYearMonthKey = getCurrentYearMonthKey(new Date(nowTick));
 
-  // Automatically load isolated monthly stats & village_history_YYYY_MM when switching accounts, locking a tag, or rolling into a new calendar month
+  // Automatically load isolated monthly stats & village_history_${YYYY_MM}_${activePlayerTag}
+  // when switching accounts, locking a tag, opening the modal, or rolling into a new calendar month
   useEffect(() => {
-    const loadedHistory = loadVillageMonthlyHistory(activePlayerTag, activeYearMonthKey);
+    const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
+    const currentTag = (currentAccount?.tag || '').trim().toUpperCase();
+    const loadedHistory = loadVillageMonthlyHistory(currentTag, activeYearMonthKey);
     setMonthlyHistory(loadedHistory);
     setMonthlyStats({
       builderPotionsCount: loadedHistory.potions.builder.used,
@@ -4020,7 +3982,7 @@ export default function App() {
       petPotionsCount: loadedHistory.potions.pet.used,
       petSecondsSaved: loadedHistory.potions.pet.timeSavedMinutes * 60,
     });
-  }, [activeAccountId, activePlayerTag, activeYearMonthKey]);
+  }, [accounts, activeAccountId, activePlayerTag, activeYearMonthKey, summaryModalSection]);
 
   const recordConfirmedPotionUsage = (
     section: 'builders' | 'lab' | 'pethouse',
@@ -4030,11 +3992,23 @@ export default function App() {
     if (addedPotionsCount <= 0 || addedSecondsSaved <= 0) {
       return;
     }
+
+    // Dynamically grab the player_tag of the currently active village on screen
+    const currentActiveVillage =
+      accounts.find((a) => a.id === activeAccountId) || accounts[0];
+    const currentActiveTag = (currentActiveVillage?.tag || activePlayerTag || '')
+      .trim()
+      .toUpperCase();
+
+    if (!currentActiveTag) {
+      return;
+    }
+
     const currentMonthKey = getCurrentYearMonthKey(new Date());
     const addedMinutes = Math.max(1, Math.round(addedSecondsSaved / 60));
 
-    // 1. Always update village_history_YYYY_MM
-    const currentHistory = loadVillageMonthlyHistory(activePlayerTag, currentMonthKey);
+    // Fetch the history object strictly for THAT specific tag: `village_history_${YYYY_MM}_${activePlayerTag}`
+    const currentHistory = loadVillageMonthlyHistory(currentActiveTag, currentMonthKey);
     const updatedHistory: VillageMonthlyHistory = {
       ...currentHistory,
       potions: {
@@ -4056,10 +4030,10 @@ export default function App() {
       updatedHistory.potions.pet.timeSavedMinutes += addedMinutes;
     }
 
-    saveVillageMonthlyHistory(updatedHistory, activePlayerTag, currentMonthKey);
+    // Save strictly back to `village_history_${YYYY_MM}_${activePlayerTag}`
+    saveVillageMonthlyHistory(updatedHistory, currentActiveTag, currentMonthKey);
     setMonthlyHistory(updatedHistory);
 
-    // 2. Keep legacy clash_stats_* synced as well
     const updatedStats: MonthlySectionStats = {
       builderPotionsCount: updatedHistory.potions.builder.used,
       builderSecondsSaved: updatedHistory.potions.builder.timeSavedMinutes * 60,
@@ -4069,9 +4043,7 @@ export default function App() {
       petSecondsSaved: updatedHistory.potions.pet.timeSavedMinutes * 60,
     };
 
-    if (activePlayerTag) {
-      saveMonthlySectionStatsForTag(activePlayerTag, section, updatedStats, currentMonthKey);
-    }
+    saveMonthlySectionStatsForTag(currentActiveTag, section, updatedStats, currentMonthKey);
     setMonthlyStats(updatedStats);
   };
 
@@ -9417,181 +9389,185 @@ export default function App() {
       )}
 
       {/* Comprehensive Monthly Progress Modal ("VILLAGE STATS - [MONTH NAME]") */}
-      {summaryModalSection !== null && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
-          onClick={() => setSummaryModalSection(null)}
-        >
+      {summaryModalSection !== null && (() => {
+        // Strictly fetch monthly history using the currently active village's player_tag
+        const activeModalPlayerTag = (activeAccountProfile?.tag || activePlayerTag || '')
+          .trim()
+          .toUpperCase();
+        const activeModalHistory = activeModalPlayerTag
+          ? loadVillageMonthlyHistory(activeModalPlayerTag, activeYearMonthKey)
+          : createEmptyVillageMonthlyHistory();
+        const completedUpgradesEntries = Object.entries(activeModalHistory.upgrades).filter(
+          ([, u]) => u.currentLevel > u.startLevel
+        );
+
+        return (
           <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="monthly-summary-title"
-            className="w-full max-w-md rounded-3xl p-5 sm:p-6 bg-[#0F131D] border border-[#2A303C] shadow-[0_0_50px_rgba(0,0,0,0.95)] space-y-4 relative overflow-hidden max-h-[88dvh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
+            onClick={() => setSummaryModalSection(null)}
           >
-            {/* Header: VILLAGE STATS - [MONTH NAME] */}
-            <div className="flex items-center justify-between gap-2 shrink-0">
-              <div>
-                <h2
-                  id="monthly-summary-title"
-                  className="text-base sm:text-lg font-black tracking-wide text-white uppercase"
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="monthly-summary-title"
+              className="w-full max-w-md rounded-3xl p-5 sm:p-6 bg-[#0F131D] border border-[#2A303C] shadow-[0_0_50px_rgba(0,0,0,0.95)] space-y-4 relative overflow-hidden max-h-[88dvh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header: VILLAGE STATS - [MONTH NAME] */}
+              <div className="flex items-center justify-between gap-2 shrink-0">
+                <div>
+                  <h2
+                    id="monthly-summary-title"
+                    className="text-base sm:text-lg font-black tracking-wide text-white uppercase"
+                  >
+                    VILLAGE STATS -{' '}
+                    <span className="text-[#F3CA65]">
+                      {new Date(nowTick)
+                        .toLocaleString('en-US', { month: 'long' })
+                        .toUpperCase()}
+                    </span>
+                  </h2>
+                  <p className="text-[11px] font-bold text-[#8E9AA8] mt-0.5">
+                    {activeAccountProfile.name}{' '}
+                    {activeModalPlayerTag ? (
+                      <span className="font-mono text-[#4ADE80]">({activeModalPlayerTag})</span>
+                    ) : null}{' '}
+                    · {getCurrentMonthDateRangeLabel(new Date(nowTick))}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic(12);
+                    setSummaryModalSection(null);
+                  }}
+                  className="tactile text-[#8E9AA8] hover:text-white text-sm font-bold px-2.5 py-1.5 rounded-xl bg-[#161B26] border border-[#2A303C] cursor-pointer"
                 >
-                  VILLAGE STATS -{' '}
-                  <span className="text-[#F3CA65]">
-                    {new Date(nowTick)
-                      .toLocaleString('en-US', { month: 'long' })
-                      .toUpperCase()}
-                  </span>
-                </h2>
-                <p className="text-[11px] font-bold text-[#8E9AA8] mt-0.5">
-                  {activeAccountProfile.name}{' '}
-                  {activePlayerTag ? (
-                    <span className="font-mono text-[#4ADE80]">({activePlayerTag})</span>
-                  ) : null}{' '}
-                  · {getCurrentMonthDateRangeLabel(new Date(nowTick))}
-                </p>
+                  ✕
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  triggerHaptic(12);
-                  setSummaryModalSection(null);
-                }}
-                className="tactile text-[#8E9AA8] hover:text-white text-sm font-bold px-2.5 py-1.5 rounded-xl bg-[#161B26] border border-[#2A303C] cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
 
-            {/* Scrollable Body (Top: Potion Analytics + Middle: Upgrades List) */}
-            <div className="overflow-y-auto space-y-4 pr-0.5 flex-1">
-              {/* Top Section: Potion Analytics (3-Row Categorized List) */}
-              <div className="space-y-2">
-                <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase px-0.5 block">
-                  POTION ANALYTICS
-                </span>
-
+              {/* Scrollable Body (Top: Potion Analytics + Middle: Upgrades List) */}
+              <div className="overflow-y-auto space-y-4 pr-0.5 flex-1">
+                {/* Top Section: Potion Analytics (3-Row Categorized List) */}
                 <div className="space-y-2">
-                  {/* Row 1: Builder Potions */}
-                  <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
-                        <img
-                          src="/icons/art_builder_potion.webp"
-                          alt="Builder Potion"
-                          className="w-full h-full object-contain"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).style.display = 'none';
-                          }}
-                        />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-xs sm:text-[13px] font-bold text-white truncate">
-                          Builder Potions Used:{' '}
-                          <span className="text-[#F3CA65] font-extrabold">
-                            {monthlyHistory.potions.builder.used}
-                          </span>
-                        </p>
-                        <p className="text-[11px] font-semibold text-[#8E9AA8]">
-                          Time Saved:{' '}
-                          <span className="text-[#4ADE80] font-bold">
-                            {formatCumulativeModalTime(
-                              monthlyHistory.potions.builder.timeSavedMinutes * 60
-                            )}
-                          </span>
-                        </p>
+                  <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase px-0.5 block">
+                    POTION ANALYTICS
+                  </span>
+
+                  <div className="space-y-2">
+                    {/* Row 1: Builder Potions */}
+                    <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                          <img
+                            src="/icons/art_builder_potion.webp"
+                            alt="Builder Potion"
+                            className="w-full h-full object-contain"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                            Builder Potions Used:{' '}
+                            <span className="text-[#F3CA65] font-extrabold">
+                              {activeModalHistory.potions.builder.used}
+                            </span>
+                          </p>
+                          <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                            Time Saved:{' '}
+                            <span className="text-[#4ADE80] font-bold">
+                              {formatCumulativeModalTime(
+                                activeModalHistory.potions.builder.timeSavedMinutes * 60
+                              )}
+                            </span>
+                          </p>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Row 2: Research Potions */}
-                  <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
-                        <img
-                          src="/icons/art_research_potion.webp"
-                          alt="Research Potion"
-                          className="w-full h-full object-contain"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).style.display = 'none';
-                          }}
-                        />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-xs sm:text-[13px] font-bold text-white truncate">
-                          Research Potions Used:{' '}
-                          <span className="text-[#F3CA65] font-extrabold">
-                            {monthlyHistory.potions.research.used}
-                          </span>
-                        </p>
-                        <p className="text-[11px] font-semibold text-[#8E9AA8]">
-                          Time Saved:{' '}
-                          <span className="text-[#93C5FD] font-bold">
-                            {formatCumulativeModalTime(
-                              monthlyHistory.potions.research.timeSavedMinutes * 60
-                            )}
-                          </span>
-                        </p>
+                    {/* Row 2: Research Potions */}
+                    <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                          <img
+                            src="/icons/art_research_potion.webp"
+                            alt="Research Potion"
+                            className="w-full h-full object-contain"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                            Research Potions Used:{' '}
+                            <span className="text-[#F3CA65] font-extrabold">
+                              {activeModalHistory.potions.research.used}
+                            </span>
+                          </p>
+                          <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                            Time Saved:{' '}
+                            <span className="text-[#93C5FD] font-bold">
+                              {formatCumulativeModalTime(
+                                activeModalHistory.potions.research.timeSavedMinutes * 60
+                              )}
+                            </span>
+                          </p>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Row 3: Pet Potions */}
-                  <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
-                        <img
-                          src="/icons/art_pet_potion.webp"
-                          alt="Pet Potion"
-                          className="w-full h-full object-contain"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).style.display = 'none';
-                          }}
-                        />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-xs sm:text-[13px] font-bold text-white truncate">
-                          Pet Potions Used:{' '}
-                          <span className="text-[#F3CA65] font-extrabold">
-                            {monthlyHistory.potions.pet.used}
-                          </span>
-                        </p>
-                        <p className="text-[11px] font-semibold text-[#8E9AA8]">
-                          Time Saved:{' '}
-                          <span className="text-[#4ADE80] font-bold">
-                            {formatCumulativeModalTime(
-                              monthlyHistory.potions.pet.timeSavedMinutes * 60
-                            )}
-                          </span>
-                        </p>
+                    {/* Row 3: Pet Potions */}
+                    <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                          <img
+                            src="/icons/art_pet_potion.webp"
+                            alt="Pet Potion"
+                            className="w-full h-full object-contain"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                            Pet Potions Used:{' '}
+                            <span className="text-[#F3CA65] font-extrabold">
+                              {activeModalHistory.potions.pet.used}
+                            </span>
+                          </p>
+                          <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                            Time Saved:{' '}
+                            <span className="text-[#4ADE80] font-bold">
+                              {formatCumulativeModalTime(
+                                activeModalHistory.potions.pet.timeSavedMinutes * 60
+                              )}
+                            </span>
+                          </p>
+                        </div>
                       </div>
                     </div>
                   </div>
                 </div>
-              </div>
 
-              {/* Middle Section: The Upgrades List */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between px-0.5">
-                  <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase">
-                    UPGRADES COMPLETED THIS MONTH
-                  </span>
-                  <span className="text-[11px] font-bold text-[#8E9AA8] tabular-nums">
-                    {
-                      Object.values(monthlyHistory.upgrades).filter(
-                        (u) => u.currentLevel > u.startLevel
-                      ).length
-                    }
-                  </span>
-                </div>
+                {/* Middle Section: The Upgrades List */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between px-0.5">
+                    <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase">
+                      UPGRADES COMPLETED THIS MONTH
+                    </span>
+                    <span className="text-[11px] font-bold text-[#8E9AA8] tabular-nums">
+                      {completedUpgradesEntries.length}
+                    </span>
+                  </div>
 
-                {Object.entries(monthlyHistory.upgrades).filter(
-                  ([, u]) => u.currentLevel > u.startLevel
-                ).length > 0 ? (
-                  <div className="space-y-2 max-h-60 overflow-y-auto pr-0.5">
-                    {Object.entries(monthlyHistory.upgrades)
-                      .filter(([, u]) => u.currentLevel > u.startLevel)
-                      .map(([itemId, entry]) => (
+                  {completedUpgradesEntries.length > 0 ? (
+                    <div className="space-y-2 max-h-60 overflow-y-auto pr-0.5">
+                      {completedUpgradesEntries.map(([itemId, entry]) => (
                         <div
                           key={itemId}
                           className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3"
@@ -9618,34 +9594,35 @@ export default function App() {
                           </span>
                         </div>
                       ))}
-                  </div>
-                ) : (
-                  <div className="rounded-2xl p-4 bg-[#161B26] border border-[#2A303C] text-center space-y-1">
-                    <p className="text-xs font-bold text-white">
-                      No level increases logged yet this month
-                    </p>
-                    <p className="text-[11px] text-[#8E9AA8] leading-relaxed">
-                      Import your village JSON periodically to automatically compare and track buildings, heroes, troops, spells, and pets upgraded this month.
-                    </p>
-                  </div>
-                )}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl p-4 bg-[#161B26] border border-[#2A303C] text-center space-y-1">
+                      <p className="text-xs font-bold text-white">
+                        No level increases logged yet this month
+                      </p>
+                      <p className="text-[11px] text-[#8E9AA8] leading-relaxed">
+                        Import your village JSON periodically to automatically compare and track buildings, heroes, troops, spells, and pets upgraded this month.
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
 
-            {/* Bottom: Gold Close Button (#F3CA65) */}
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic(15);
-                setSummaryModalSection(null);
-              }}
-              className="tactile w-full py-3 rounded-2xl font-extrabold text-sm bg-[#F3CA65] hover:bg-[#E5BA53] text-[#0B0E14] shadow-[0_6px_20px_rgba(243,202,101,0.22)] cursor-pointer shrink-0 transition-all"
-            >
-              Close
-            </button>
+              {/* Bottom: Gold Close Button (#F3CA65) */}
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(15);
+                  setSummaryModalSection(null);
+                }}
+                className="tactile w-full py-3 rounded-2xl font-extrabold text-sm bg-[#F3CA65] hover:bg-[#E5BA53] text-[#0B0E14] shadow-[0_6px_20px_rgba(243,202,101,0.22)] cursor-pointer shrink-0 transition-all"
+              >
+                Close
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Two-Step Confirmation Modal for Clearing Active Lab / Pet Upgrade Timer */}
       {pendingClearSlot !== null && (
