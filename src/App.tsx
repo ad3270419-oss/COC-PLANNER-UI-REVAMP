@@ -3588,7 +3588,7 @@ const LedgerUpgradeQueueCard: React.FC<{
               )}
             </div>
 
-            {/* Large Highly Readable Time Remaining */}
+            {/* Middle-Bottom (Large Text): Exact Real-World Finish Date */}
             <div className="mt-1.5 flex items-baseline justify-between gap-2">
               {liveState.isFinished ? (
                 <span className="text-sm sm:text-base font-extrabold text-[#4ADE80] uppercase tracking-wide">
@@ -3601,10 +3601,10 @@ const LedgerUpgradeQueueCard: React.FC<{
                     triggerHaptic(10);
                     setShowDetailedTicker((prev) => !prev);
                   }}
-                  className="text-left text-xl sm:text-2xl font-extrabold text-white tracking-tight tabular-nums cursor-pointer hover:text-[#F3CA65] transition-colors"
+                  className="text-left text-lg sm:text-xl font-extrabold text-white tracking-tight tabular-nums cursor-pointer hover:text-[#F3CA65] transition-colors leading-snug"
                   title="Tap to toggle second-by-second HUD ticker"
                 >
-                  {liveState.compactTime}
+                  {displayDate}
                 </button>
               )}
             </div>
@@ -3642,10 +3642,10 @@ const LedgerUpgradeQueueCard: React.FC<{
           />
         </div>
 
-        {/* Exact Completion Date Footer */}
+        {/* Bottom Progress Line (Small Text): Remaining Countdown Time */}
         <div className="flex items-center justify-between gap-2 text-[11px] font-semibold text-[#8E9AA8]">
-          <span className="truncate">
-            ↗ {displayDate}
+          <span className="truncate tabular-nums">
+            ↗ {liveState.isFinished ? 'Completed' : liveState.compactTime}
             {helperFooterNote}
           </span>
           <button
@@ -7040,11 +7040,11 @@ export default function App() {
   })();
 
   return (
-    <div className="min-h-dvh w-full bg-[#0B0E14] text-white flex flex-col items-center justify-start px-3.5 sm:px-5 pt-4 pb-12 overflow-y-auto overflow-x-hidden select-none">
+    <div className="app-safe-area-shell min-h-dvh w-full bg-[#0B0E14] text-white flex flex-col items-center justify-start sm:px-5 overflow-y-auto overflow-x-hidden select-none">
       {/* Toast Notification */}
       {toast && (
         <div
-          className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl font-extrabold text-xs sm:text-sm shadow-2xl border flex items-center gap-2 transition-all ${
+          className={`fixed top-12 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl font-extrabold text-xs sm:text-sm shadow-2xl border flex items-center gap-2 transition-all ${
             toast.type === 'success'
               ? 'bg-emerald-950/95 text-[#4ADE80] border-emerald-400/50 shadow-emerald-500/20'
               : 'bg-rose-950/95 text-rose-300 border-rose-400/50 shadow-rose-500/20'

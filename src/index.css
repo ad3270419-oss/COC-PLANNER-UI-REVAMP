@@ -16,13 +16,14 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-.app-edge-to-edge-wrapper {
+.app-edge-to-edge-wrapper,
+.app-safe-area-shell {
   min-height: 100vh;
   min-height: 100dvh;
-  padding-top: max(16px, env(safe-area-inset-top));
-  padding-bottom: max(20px, env(safe-area-inset-bottom));
-  padding-left: max(12px, env(safe-area-inset-left));
-  padding-right: max(12px, env(safe-area-inset-right));
+  padding-top: max(calc(env(safe-area-inset-top, 24px) + 16px), 40px);
+  padding-bottom: max(48px, calc(env(safe-area-inset-bottom, 16px) + 32px));
+  padding-left: max(14px, env(safe-area-inset-left, 0px));
+  padding-right: max(14px, env(safe-area-inset-right, 0px));
 }
 
 /* Clash Ledger Native Surface Tokens */
