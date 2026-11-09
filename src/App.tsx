@@ -517,23 +517,79 @@ function loadVillageMonthlyHistory(
   const legacyResearchMins = Math.round(legacyTagStats.labSecondsSaved / 60);
   const legacyPetMins = Math.round(legacyTagStats.petSecondsSaved / 60);
 
+  let mergedBuilderUsed = Math.max(
+    history.potions.builder.used,
+    legacyTagStats.builderPotionsCount
+  );
+  let mergedBuilderMins = Math.max(
+    history.potions.builder.timeSavedMinutes,
+    legacyBuilderMins
+  );
+  const mergedResearchUsed = Math.max(
+    history.potions.research.used,
+    legacyTagStats.researchPotionsCount
+  );
+  const mergedResearchMins = Math.max(
+    history.potions.research.timeSavedMinutes,
+    legacyResearchMins
+  );
+  const mergedPetUsed = Math.max(
+    history.potions.pet.used,
+    legacyTagStats.petPotionsCount
+  );
+  const mergedPetMins = Math.max(
+    history.potions.pet.timeSavedMinutes,
+    legacyPetMins
+  );
+
+  // One-time recovery for the 5 Builder Potions used on DEATH DELEAR (#9PLPQVLU8) in 2026_11
+  // that were missed when JSON boost auto-crediting was absent during import
+  if (cleanedTag === '#9PLPQVLU8' && yearMonthKey === '2026_11') {
+    const recoveryKey = 'clash_recovered_5_builder_potions_#9PLPQVLU8_2026_11';
+    try {
+      if (!localStorage.getItem(recoveryKey)) {
+        if (mergedBuilderUsed === 18) {
+          mergedBuilderUsed += 5;
+          // 5 Builder Potions across 7 active builders (6/6 + Goblin) = 5 * 7 * 9h = 315h = 18,900 mins
+          mergedBuilderMins += 5 * 7 * 9 * 60;
+        }
+        localStorage.setItem(recoveryKey, '1');
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
   history = {
     ...history,
     potions: {
       builder: {
-        used: legacyTagStats.builderPotionsCount,
-        timeSavedMinutes: legacyBuilderMins,
+        used: mergedBuilderUsed,
+        timeSavedMinutes: mergedBuilderMins,
       },
       research: {
-        used: legacyTagStats.researchPotionsCount,
-        timeSavedMinutes: legacyResearchMins,
+        used: mergedResearchUsed,
+        timeSavedMinutes: mergedResearchMins,
       },
       pet: {
-        used: legacyTagStats.petPotionsCount,
-        timeSavedMinutes: legacyPetMins,
+        used: mergedPetUsed,
+        timeSavedMinutes: mergedPetMins,
       },
     },
   };
+
+  // Keep per-tag section stats in sync with merged history so neither overwrites the other
+  const syncedSectionStats: MonthlySectionStats = {
+    builderPotionsCount: mergedBuilderUsed,
+    builderSecondsSaved: mergedBuilderMins * 60,
+    researchPotionsCount: mergedResearchUsed,
+    labSecondsSaved: mergedResearchMins * 60,
+    petPotionsCount: mergedPetUsed,
+    petSecondsSaved: mergedPetMins * 60,
+  };
+  saveMonthlySectionStatsForTag(cleanedTag, 'builders', syncedSectionStats, yearMonthKey);
+  saveMonthlySectionStatsForTag(cleanedTag, 'lab', syncedSectionStats, yearMonthKey);
+  saveMonthlySectionStatsForTag(cleanedTag, 'pethouse', syncedSectionStats, yearMonthKey);
 
   // If no baseline snapshot exists yet for this village & month, upgrades must remain empty
   if (!hasVillageBaselineInStorage(cleanedTag, yearMonthKey)) {
@@ -6644,13 +6700,112 @@ export default function App() {
       });
     }
 
-    // Sync Monthly Baseline (`village_baseline_${YYYY_MM}_${PLAYER_TAG}`) and
+    // Sync Monthly Baseline (`village_baseline_${YYYY_MM}_${PLAYER_TAG}`),
+    // Active JSON Boost Potions (`data.boosts`), and
     // Monthly History (`village_history_${YYYY_MM}_${PLAYER_TAG}`) on JSON import
     const existingBoundTag = !isAddingNewAccount
       ? accounts.find((a) => a.id === activeAccountId)?.tag?.trim()
       : undefined;
     const resolvedImportPlayerTag = (extractedTag || existingBoundTag || '').trim().toUpperCase();
     const currentMonthKey = getCurrentYearMonthKey(new Date(importNow));
+
+    if (resolvedImportPlayerTag) {
+      const prevBoostTrack = loadLastImportedBoostState(resolvedImportPlayerTag);
+      const builderBoostTrack = computeNewlyCreditedBoostPotions(
+        builderBoostSeconds,
+        prevBoostTrack.builder,
+        importNow,
+        jsonExportTimestamp
+      );
+      const labBoostTrack = computeNewlyCreditedBoostPotions(
+        labBoostSeconds,
+        prevBoostTrack.lab,
+        importNow,
+        jsonExportTimestamp
+      );
+      const petBoostTrack = computeNewlyCreditedBoostPotions(
+        petBoostSeconds,
+        prevBoostTrack.pet,
+        importNow,
+        jsonExportTimestamp
+      );
+
+      const nextBoostTrackState: LastImportedBoostState = {};
+      if (builderBoostTrack.nextEntry) {
+        nextBoostTrackState.builder = builderBoostTrack.nextEntry;
+      }
+      if (labBoostTrack.nextEntry) {
+        nextBoostTrackState.lab = labBoostTrack.nextEntry;
+      }
+      if (petBoostTrack.nextEntry) {
+        nextBoostTrackState.pet = petBoostTrack.nextEntry;
+      }
+      saveLastImportedBoostState(resolvedImportPlayerTag, nextBoostTrackState);
+
+      const preImportHistory = loadVillageMonthlyHistory(
+        resolvedImportPlayerTag,
+        currentMonthKey
+      );
+      let didCreditBoostPotions = false;
+
+      if (builderBoostTrack.potionsToCredit > 0) {
+        const activeBuildersForBoost =
+          totalLoadedBuilders > 0 ? totalLoadedBuilders : nextBuilderSliderCount;
+        const addedBuilderMins =
+          activeBuildersForBoost * 9 * 60 * builderBoostTrack.potionsToCredit;
+        preImportHistory.potions.builder.used += builderBoostTrack.potionsToCredit;
+        preImportHistory.potions.builder.timeSavedMinutes += addedBuilderMins;
+        didCreditBoostPotions = true;
+      }
+
+      if (labBoostTrack.potionsToCredit > 0) {
+        const activeLabSlotsForBoost = Math.max(
+          1,
+          (standardLabItem ? 1 : 0) + (goblinLabItem ? 1 : 0)
+        );
+        const addedLabMins = activeLabSlotsForBoost * 23 * 60 * labBoostTrack.potionsToCredit;
+        preImportHistory.potions.research.used += labBoostTrack.potionsToCredit;
+        preImportHistory.potions.research.timeSavedMinutes += addedLabMins;
+        didCreditBoostPotions = true;
+      }
+
+      if (petBoostTrack.potionsToCredit > 0) {
+        const addedPetMins = 23 * 60 * petBoostTrack.potionsToCredit;
+        preImportHistory.potions.pet.used += petBoostTrack.potionsToCredit;
+        preImportHistory.potions.pet.timeSavedMinutes += addedPetMins;
+        didCreditBoostPotions = true;
+      }
+
+      if (didCreditBoostPotions) {
+        saveVillageMonthlyHistory(preImportHistory, resolvedImportPlayerTag, currentMonthKey);
+        const updatedBoostSectionStats: MonthlySectionStats = {
+          builderPotionsCount: preImportHistory.potions.builder.used,
+          builderSecondsSaved: preImportHistory.potions.builder.timeSavedMinutes * 60,
+          researchPotionsCount: preImportHistory.potions.research.used,
+          labSecondsSaved: preImportHistory.potions.research.timeSavedMinutes * 60,
+          petPotionsCount: preImportHistory.potions.pet.used,
+          petSecondsSaved: preImportHistory.potions.pet.timeSavedMinutes * 60,
+        };
+        saveMonthlySectionStatsForTag(
+          resolvedImportPlayerTag,
+          'builders',
+          updatedBoostSectionStats,
+          currentMonthKey
+        );
+        saveMonthlySectionStatsForTag(
+          resolvedImportPlayerTag,
+          'lab',
+          updatedBoostSectionStats,
+          currentMonthKey
+        );
+        saveMonthlySectionStatsForTag(
+          resolvedImportPlayerTag,
+          'pethouse',
+          updatedBoostSectionStats,
+          currentMonthKey
+        );
+      }
+    }
 
     const updatedHistoryObj = syncMonthlyBaselineAndHistoryOnImport(
       parsedData,
