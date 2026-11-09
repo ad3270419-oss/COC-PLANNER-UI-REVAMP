@@ -542,10 +542,10 @@ function loadVillageMonthlyHistory(
     legacyPetMins
   );
 
-  // One-time recovery for the 5 Builder Potions used on DEATH DELEAR (#9PLPQVLU8) in 2026_11
-  // that were missed when JSON boost auto-crediting was absent during import
+  // One-time recovery & duplicate-import correction for DEATH DELEAR (#9PLPQVLU8) in 2026_11
   if (cleanedTag === '#9PLPQVLU8' && yearMonthKey === '2026_11') {
     const recoveryKey = 'clash_recovered_5_builder_potions_#9PLPQVLU8_2026_11';
+    const dedupeFixKey = 'clash_fixed_duplicate_4_potions_#9PLPQVLU8_2026_11';
     try {
       if (!localStorage.getItem(recoveryKey)) {
         if (mergedBuilderUsed === 18) {
@@ -554,6 +554,14 @@ function loadVillageMonthlyHistory(
           mergedBuilderMins += 5 * 7 * 9 * 60;
         }
         localStorage.setItem(recoveryKey, '1');
+      }
+      if (!localStorage.getItem(dedupeFixKey)) {
+        if (mergedBuilderUsed === 27) {
+          // Remove the 4 duplicate potions added when re-importing the 3h 2m remaining boost
+          mergedBuilderUsed = 23;
+          mergedBuilderMins = Math.max(0, mergedBuilderMins - 4 * 7 * 9 * 60);
+        }
+        localStorage.setItem(dedupeFixKey, '1');
       }
     } catch {
       // Ignore storage errors
@@ -1034,21 +1042,30 @@ function computeNewlyCreditedBoostPotions(
   }
 
   // Guard 2: Subsequent export from the same active boost session (remaining time ticked down or expiry unchanged)
-  const prevRemainingSecAtImport = Math.max(
+  const wallClockRemSec = Math.max(
     0,
     Math.floor((prevEntry.expiryTimestamp - importNow) / 1000)
   );
+  const jsonTsRemSec =
+    jsonTimestamp !== null &&
+    prevEntry.jsonTimestamp !== null &&
+    jsonTimestamp >= prevEntry.jsonTimestamp
+      ? Math.max(0, prevEntry.rawBoostSeconds - (jsonTimestamp - prevEntry.jsonTimestamp))
+      : 0;
+  const prevRemainingSecAtImport = Math.max(wallClockRemSec, jsonTsRemSec);
   const prevRemainingPotionsAtImport = Math.ceil(prevRemainingSecAtImport / 3600);
 
+  // Each potion adds a full 3600s (1 hour). Unless remaining boost increased by >1800s (30m)
+  // above the ongoing session's expected remaining time, it is the same active boost ticking down.
   if (
-    boostRemainingSeconds <= prevRemainingSecAtImport + 300 ||
+    boostRemainingSeconds <= prevRemainingSecAtImport + 1800 ||
     totalPotionsInJson <= prevRemainingPotionsAtImport
   ) {
     return {
       potionsToCredit: 0,
       nextEntry: {
         rawBoostSeconds: boostRemainingSeconds,
-        jsonTimestamp,
+        jsonTimestamp: jsonTimestamp ?? prevEntry.jsonTimestamp,
         startTimestamp: prevEntry.startTimestamp,
         expiryTimestamp: newExpiryTimestamp,
         creditedPotions: prevEntry.creditedPotions,
@@ -1057,12 +1074,15 @@ function computeNewlyCreditedBoostPotions(
   }
 
   // Newly stacked potion increments added to the ongoing active boost session
-  const newlyAddedPotions = Math.max(0, totalPotionsInJson - prevRemainingPotionsAtImport);
+  const newlyAddedPotions = Math.max(
+    0,
+    Math.round((boostRemainingSeconds - prevRemainingSecAtImport) / 3600)
+  );
   return {
     potionsToCredit: newlyAddedPotions,
     nextEntry: {
       rawBoostSeconds: boostRemainingSeconds,
-      jsonTimestamp,
+      jsonTimestamp: jsonTimestamp ?? prevEntry.jsonTimestamp,
       startTimestamp: prevEntry.startTimestamp,
       expiryTimestamp: newExpiryTimestamp,
       creditedPotions: prevEntry.creditedPotions + newlyAddedPotions,
@@ -6614,6 +6634,21 @@ export default function App() {
         : thLevel;
     const syncedTimeLabel = formatWidgetClockTime(importNow);
 
+    // Capture the village's existing active boost timestamps BEFORE overwriting state
+    // so an already-active boost session in the app is never double-counted as a new boost
+    const existingActiveProfileBeforeImport = !isAddingNewAccount
+      ? accounts.find((a) => a.id === activeAccountId)
+      : undefined;
+    const prevActiveBuilderBoostEndTime = !isAddingNewAccount
+      ? existingActiveProfileBeforeImport?.data?.builderBoostEndTime ?? builderBoostEndTime
+      : null;
+    const prevActiveLabBoostEndTime = !isAddingNewAccount
+      ? existingActiveProfileBeforeImport?.data?.labBoostEndTime ?? labBoostEndTime
+      : null;
+    const prevActivePetBoostEndTime = !isAddingNewAccount
+      ? existingActiveProfileBeforeImport?.data?.petBoostEndTime ?? petBoostEndTime
+      : null;
+
     setLabTimer(nextLabTimer);
     setGoblinLabTimer(nextGoblinLabTimer);
     setPetTimer(nextPetTimer);
@@ -6711,21 +6746,63 @@ export default function App() {
 
     if (resolvedImportPlayerTag) {
       const prevBoostTrack = loadLastImportedBoostState(resolvedImportPlayerTag);
+
+      // If `lastImportedBoostState_${TAG}` didn't have an entry yet for an already-running
+      // boost in the app, seed the previous entry from the village's existing active boost timer
+      const resolveEffectivePrevBoostEntry = (
+        trackedEntry: BoostImportTrackEntry | undefined,
+        existingBoostEndTs: number | null | undefined
+      ): BoostImportTrackEntry | undefined => {
+        if (trackedEntry && importNow < trackedEntry.expiryTimestamp) {
+          if (existingBoostEndTs && existingBoostEndTs > trackedEntry.expiryTimestamp) {
+            return {
+              ...trackedEntry,
+              expiryTimestamp: existingBoostEndTs,
+            };
+          }
+          return trackedEntry;
+        }
+        if (existingBoostEndTs && existingBoostEndTs > importNow) {
+          const remSec = Math.max(1, Math.ceil((existingBoostEndTs - importNow) / 1000));
+          return {
+            rawBoostSeconds: remSec,
+            jsonTimestamp: null,
+            startTimestamp: importNow,
+            expiryTimestamp: existingBoostEndTs,
+            creditedPotions: Math.ceil(remSec / 3600),
+          };
+        }
+        return trackedEntry;
+      };
+
+      const effectivePrevBuilderEntry = resolveEffectivePrevBoostEntry(
+        prevBoostTrack.builder,
+        prevActiveBuilderBoostEndTime
+      );
+      const effectivePrevLabEntry = resolveEffectivePrevBoostEntry(
+        prevBoostTrack.lab,
+        prevActiveLabBoostEndTime
+      );
+      const effectivePrevPetEntry = resolveEffectivePrevBoostEntry(
+        prevBoostTrack.pet,
+        prevActivePetBoostEndTime
+      );
+
       const builderBoostTrack = computeNewlyCreditedBoostPotions(
         builderBoostSeconds,
-        prevBoostTrack.builder,
+        effectivePrevBuilderEntry,
         importNow,
         jsonExportTimestamp
       );
       const labBoostTrack = computeNewlyCreditedBoostPotions(
         labBoostSeconds,
-        prevBoostTrack.lab,
+        effectivePrevLabEntry,
         importNow,
         jsonExportTimestamp
       );
       const petBoostTrack = computeNewlyCreditedBoostPotions(
         petBoostSeconds,
-        prevBoostTrack.pet,
+        effectivePrevPetEntry,
         importNow,
         jsonExportTimestamp
       );
