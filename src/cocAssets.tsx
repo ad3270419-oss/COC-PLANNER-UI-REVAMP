@@ -29,21 +29,25 @@ export function resolveUpgradeIconSources(params: {
   rawId?: string | number | null;
   upgradeTitle?: string | null;
   upgradeLevel?: number | null;
+  targetLevel?: number | null;
   category?: 'builders' | 'laboratory' | 'pethouse';
 }): string[] {
-  const { rawId, upgradeTitle, upgradeLevel, category = 'builders' } = params;
+  const { rawId, upgradeTitle, upgradeLevel, targetLevel, category = 'builders' } = params;
   const candidates: string[] = [];
 
   const cleanedId = rawId !== undefined && rawId !== null ? String(rawId).trim() : '';
   const cleanedTitle = upgradeTitle ? upgradeTitle.trim() : '';
   const lowerTitle = cleanedTitle.toLowerCase();
 
-  // Special handling if the upgrade itself is Town Hall (1000001)
+  // Special handling if the item is Town Hall (1000001)
   if (cleanedId === '1000001' || lowerTitle === 'town hall') {
-    if (typeof upgradeLevel === 'number' && upgradeLevel >= 1 && upgradeLevel <= 18) {
-      const targetTh = Math.min(18, Math.max(1, upgradeLevel + 1));
-      candidates.push(`/icons/art_town_hall_${targetTh}.webp`);
-      candidates.push(`/icons/art_town_hall_${upgradeLevel}.webp`);
+    if (typeof targetLevel === 'number' && targetLevel >= 1 && targetLevel <= 18) {
+      const exactTh = Math.min(18, Math.max(1, Math.floor(targetLevel)));
+      candidates.push(`/icons/art_town_hall_${exactTh}.webp`);
+    } else if (typeof upgradeLevel === 'number' && upgradeLevel >= 1 && upgradeLevel <= 18) {
+      const nextTh = Math.min(18, Math.max(1, Math.floor(upgradeLevel) + 1));
+      candidates.push(`/icons/art_town_hall_${nextTh}.webp`);
+      candidates.push(`/icons/art_town_hall_${Math.floor(upgradeLevel)}.webp`);
     }
     candidates.push('/icons/art_1000001.webp');
   }
@@ -88,15 +92,25 @@ export const UpgradeAssetIcon: React.FC<{
   rawId?: string | number | null;
   upgradeTitle?: string | null;
   upgradeLevel?: number | null;
+  targetLevel?: number | null;
   category?: 'builders' | 'laboratory' | 'pethouse';
   className?: string;
-}> = React.memo(({ rawId, upgradeTitle, upgradeLevel, category = 'builders', className = '' }) => {
-  const sources = resolveUpgradeIconSources({
+}> = React.memo(
+  ({
     rawId,
     upgradeTitle,
     upgradeLevel,
-    category,
-  });
+    targetLevel,
+    category = 'builders',
+    className = '',
+  }) => {
+    const sources = resolveUpgradeIconSources({
+      rawId,
+      upgradeTitle,
+      upgradeLevel,
+      targetLevel,
+      category,
+    });
 
   const [sourceIndex, setSourceIndex] = useState(0);
   const [allFailed, setAllFailed] = useState(false);

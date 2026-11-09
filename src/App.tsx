@@ -490,8 +490,9 @@ function loadVillageMonthlyHistory(
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
 ): VillageMonthlyHistory {
-  const scopedKey = getScopedVillageHistoryStorageKey(playerTag, yearMonthKey);
-  if (!scopedKey) {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  const scopedKey = getScopedVillageHistoryStorageKey(cleanedTag, yearMonthKey);
+  if (!cleanedTag || !scopedKey) {
     return createEmptyVillageMonthlyHistory();
   }
 
@@ -506,14 +507,43 @@ function loadVillageMonthlyHistory(
     // Ignore parse errors
   }
 
+  // Migrate/sync from the old app's strictly tag-isolated keys:
+  // `clash_stats_${TAG}_${YYYY_MM}_{builders|lab|pethouse}`
+  // Because `recordConfirmedPotionUsage` always updates `clash_stats_${TAG}_${YYYY_MM}_*`
+  // and those keys were never touched by the global key bug, they hold the exact true
+  // potion history for both old-app and new-UI sessions per playerTag.
+  const legacyTagStats = loadMonthlyStatsForTag(cleanedTag, yearMonthKey);
+  const legacyBuilderMins = Math.round(legacyTagStats.builderSecondsSaved / 60);
+  const legacyResearchMins = Math.round(legacyTagStats.labSecondsSaved / 60);
+  const legacyPetMins = Math.round(legacyTagStats.petSecondsSaved / 60);
+
+  history = {
+    ...history,
+    potions: {
+      builder: {
+        used: legacyTagStats.builderPotionsCount,
+        timeSavedMinutes: legacyBuilderMins,
+      },
+      research: {
+        used: legacyTagStats.researchPotionsCount,
+        timeSavedMinutes: legacyResearchMins,
+      },
+      pet: {
+        used: legacyTagStats.petPotionsCount,
+        timeSavedMinutes: legacyPetMins,
+      },
+    },
+  };
+
   // If no baseline snapshot exists yet for this village & month, upgrades must remain empty
-  if (!hasVillageBaselineInStorage(playerTag, yearMonthKey)) {
+  if (!hasVillageBaselineInStorage(cleanedTag, yearMonthKey)) {
     history = {
       ...history,
       upgrades: {},
     };
   }
 
+  saveVillageMonthlyHistory(history, cleanedTag, yearMonthKey);
   return history;
 }
 
@@ -3314,10 +3344,8 @@ function formatQuickStatDuration(parts: {
 }
 
 const LedgerQuickStatsRow: React.FC<{
-  busyRegularCount: number;
   regularCap: number;
-  isGoblinBusy: boolean;
-  soonestBuilderItem: LockedResultItem | null;
+  builderItems: LockedResultItem[];
   builderBoostEndTime: number | null;
   builderApprentice: BuilderApprenticeState;
   targetLabTimestamp: number | null;
@@ -3326,10 +3354,8 @@ const LedgerQuickStatsRow: React.FC<{
   labApprentice: LabApprenticeState;
 }> = React.memo(
   ({
-    busyRegularCount,
     regularCap,
-    isGoblinBusy,
-    soonestBuilderItem,
+    builderItems,
     builderBoostEndTime,
     builderApprentice,
     targetLabTimestamp,
@@ -3338,24 +3364,23 @@ const LedgerQuickStatsRow: React.FC<{
     labApprentice,
   }) => {
     const computeSnapshot = (now: number) => {
+      // Dynamically filter unfinished builder upgrades against `now` every second
+      // so when an upgrade completes, `NEXT FREE` immediately advances to the next active upgrade.
+      const activeBuilders = builderItems
+        .filter((r) => r.targetTimestamp > now)
+        .sort((a, b) => a.targetTimestamp - b.targetTimestamp);
+
+      const busyRegularCount = activeBuilders.filter((r) => !r.isGoblin).length;
+      const isGoblinBusy = activeBuilders.some((r) => r.isGoblin);
+      const soonestActiveBuilder = activeBuilders[0] || null;
+
       let nextFreeText = 'All Free';
-      if (soonestBuilderItem && soonestBuilderItem.targetTimestamp > now) {
-        const isAssigned = builderApprentice.assignedSlot === soonestBuilderItem.builderIndex;
-        const cycle = isAssigned ? getHelperCycleStateAt(builderApprentice, now) : null;
-        const parts = computeTimeParts(
-          soonestBuilderItem.targetTimestamp,
-          cycle && cycle.isWorkingNow
-            ? cycle.activeRemSec > 0
-              ? now + cycle.activeRemSec * 1000
-              : builderApprentice.activeSessionEndTime
-            : null,
-          getHelperSpeedMultiplier(builderApprentice.level),
-          builderBoostEndTime,
-          10,
-          now,
-          builderApprentice,
-          isAssigned
+      if (soonestActiveBuilder) {
+        const realRemSec = Math.max(
+          0,
+          Math.ceil((soonestActiveBuilder.targetTimestamp - now) / 1000)
         );
+        const parts = formatTotalSecondsToParts(realRemSec);
         nextFreeText = parts.isFinished ? 'Free' : formatQuickStatDuration(parts);
       }
 
@@ -3370,26 +3395,17 @@ const LedgerQuickStatsRow: React.FC<{
       if (candidates.length > 0) {
         candidates.sort((a, b) => a.ts - b.ts);
         const soonestLab = candidates[0];
-        const isLabHelperHere = labApprentice.assignedSlot === soonestLab.slot;
-        const labCycle = isLabHelperHere ? getHelperCycleStateAt(labApprentice, now) : null;
-        const labParts = computeTimeParts(
-          soonestLab.ts,
-          labCycle && labCycle.isWorkingNow
-            ? labCycle.activeRemSec > 0
-              ? now + labCycle.activeRemSec * 1000
-              : labApprentice.activeSessionEndTime
-            : null,
-          getHelperSpeedMultiplier(labApprentice.level),
-          labBoostEndTime,
-          24,
-          now,
-          labApprentice,
-          isLabHelperHere
-        );
+        const labRealRemSec = Math.max(0, Math.ceil((soonestLab.ts - now) / 1000));
+        const labParts = formatTotalSecondsToParts(labRealRemSec);
         nextLabText = labParts.isFinished ? 'Idle' : formatQuickStatDuration(labParts);
       }
 
-      return { nextFreeText, nextLabText };
+      return {
+        busyRegularCount,
+        isGoblinBusy,
+        nextFreeText,
+        nextLabText,
+      };
     };
 
     const [stats, setStats] = useState(() => computeSnapshot(Date.now()));
@@ -3398,7 +3414,10 @@ const LedgerQuickStatsRow: React.FC<{
       const update = (now: number) => {
         const next = computeSnapshot(now);
         setStats((prev) =>
-          prev.nextFreeText === next.nextFreeText && prev.nextLabText === next.nextLabText
+          prev.busyRegularCount === next.busyRegularCount &&
+          prev.isGoblinBusy === next.isGoblinBusy &&
+          prev.nextFreeText === next.nextFreeText &&
+          prev.nextLabText === next.nextLabText
             ? prev
             : next
         );
@@ -3406,7 +3425,7 @@ const LedgerQuickStatsRow: React.FC<{
       update(Date.now());
       return subscribeMasterTick(update);
     }, [
-      soonestBuilderItem,
+      builderItems,
       builderBoostEndTime,
       builderApprentice,
       targetLabTimestamp,
@@ -3424,8 +3443,8 @@ const LedgerQuickStatsRow: React.FC<{
             <span>BUILDERS</span>
           </div>
           <div className="text-lg sm:text-2xl font-extrabold text-[#F3CA65] tracking-tight tabular-nums mt-1.5">
-            {busyRegularCount} / {regularCap}
-            {isGoblinBusy ? ' + G' : ''}
+            {stats.busyRegularCount} / {regularCap}
+            {stats.isGoblinBusy ? ' + G' : ''}
           </div>
         </div>
 
@@ -3506,16 +3525,9 @@ const LedgerUpgradeQueueCard: React.FC<{
     const [showDetailedTicker, setShowDetailedTicker] = useState(false);
 
     const computeCardState = (now: number) => {
-      const parts = computeTimeParts(
-        targetTimestamp,
-        helperBoostEndTime,
-        helperSpeedMultiplier,
-        potionBoostEndTime,
-        potionSpeedMultiplier,
-        now,
-        helper,
-        isHelperAssignedToSlot
-      );
+      // `targetTimestamp` already incorporates all active & previewed Potion and Helper boost deductions
+      const realRemSec = Math.max(0, Math.ceil((targetTimestamp - now) / 1000));
+      const parts = formatTotalSecondsToParts(realRemSec);
 
       const pActive =
         !!potionBoostEndTime && potionBoostEndTime > now && potionSpeedMultiplier > 1;
@@ -5764,6 +5776,7 @@ export default function App() {
   // When a specific upgrade finishes (timer reaches 0), immediately detach the helper
   // from that slot without jumping to any other building or troop.
   const handleBuilderUpgradeFinished = useCallback((slotIdx: number) => {
+    setNowTick(Date.now());
     setBuilderApprentice((prev) => {
       if (prev.assignedSlot !== slotIdx) return prev;
       return {
@@ -5776,6 +5789,7 @@ export default function App() {
   }, []);
 
   const handleLabUpgradeFinished = useCallback((slot: 'main' | 'goblin') => {
+    setNowTick(Date.now());
     setLabApprentice((prev) => {
       if (prev.assignedSlot !== slot) return prev;
       return {
@@ -6740,10 +6754,16 @@ export default function App() {
     (showResult && lockedResults.length > 0) ||
     (pendingBuilderPotions > 0 && displayedBuilderResults.length > 0);
 
-  // Find the upgrade finishing soonest among active displayed results
+  // Find the upgrade finishing soonest among active (unfinished) displayed results
+  const activeUnfinishedBuilderResults = (
+    pendingBuilderPotions > 0 && builderPreview
+      ? builderPreview.computedResults
+      : displayedBuilderResults
+  ).filter((r) => r.targetTimestamp > nowTick);
+
   const soonestTargetTimestamp =
-    displayedBuilderResults.length > 0
-      ? Math.min(...displayedBuilderResults.map((r) => r.targetTimestamp))
+    activeUnfinishedBuilderResults.length > 0
+      ? Math.min(...activeUnfinishedBuilderResults.map((r) => r.targetTimestamp))
       : null;
 
   const labPreview =
@@ -6905,12 +6925,28 @@ export default function App() {
   const isGoblinBuilderBusy = displayedBuilderResults.some(
     (r) => r.isGoblin && r.targetTimestamp > nowTick
   );
+  const effectiveBuilderResultsForQuickStats =
+    pendingBuilderPotions > 0 && builderPreview
+      ? builderPreview.computedResults
+      : displayedBuilderResults;
+
   const soonestBuilderItem =
-    displayedBuilderResults
+    effectiveBuilderResultsForQuickStats
       .filter((r) => r.targetTimestamp > nowTick)
       .sort((a, b) => a.targetTimestamp - b.targetTimestamp)[0] ||
-    displayedBuilderResults[0] ||
+    effectiveBuilderResultsForQuickStats[0] ||
     null;
+
+  const effectiveLabMainTimestamp =
+    researchPotions > 0 && labPreview?.nextMainTs
+      ? labPreview.nextMainTs
+      : targetLabTimestamp;
+  const effectiveLabGoblinTimestamp =
+    researchPotions > 0 && labPreview?.nextGoblinTs
+      ? labPreview.nextGoblinTs
+      : targetGoblinLabTimestamp;
+  const effectivePetTimestamp =
+    petPotions > 0 && petPreview?.nextPetTs ? petPreview.nextPetTs : targetPetTimestamp;
 
   const activeLabQueueCount =
     (targetLabTimestamp ? 1 : 0) + (targetGoblinLabTimestamp ? 1 : 0);
@@ -7221,14 +7257,12 @@ export default function App() {
         {/* B. 3-STAT METRIC ROW (BUILDERS | NEXT FREE | NEXT LAB)          */}
         {/* =============================================================== */}
         <LedgerQuickStatsRow
-          busyRegularCount={busyRegularBuildersCount}
           regularCap={regularBuildersCap}
-          isGoblinBusy={isGoblinBuilderBusy}
-          soonestBuilderItem={soonestBuilderItem}
+          builderItems={effectiveBuilderResultsForQuickStats}
           builderBoostEndTime={builderBoostEndTime}
           builderApprentice={builderApprentice}
-          targetLabTimestamp={targetLabTimestamp}
-          targetGoblinLabTimestamp={targetGoblinLabTimestamp}
+          targetLabTimestamp={effectiveLabMainTimestamp}
+          targetGoblinLabTimestamp={effectiveLabGoblinTimestamp}
           labBoostEndTime={labBoostEndTime}
           labApprentice={labApprentice}
         />
@@ -8377,55 +8411,83 @@ export default function App() {
 
               {displayedBuilderResults.length > 0 ? (
                 <div className="space-y-3">
-                  {displayedBuilderResults.map((item, idx) => {
-                    const previewMatch = builderPreview?.computedResults.find(
-                      (p) => p.builderIndex === item.builderIndex
-                    );
-                    const displayDate =
-                      pendingBuilderPotions > 0 && previewMatch
-                        ? previewMatch.formattedDate
-                        : item.formattedDate;
-                    const isFinishingNext =
-                      displayedBuilderResults.length > 1 &&
-                      soonestTargetTimestamp !== null &&
-                      item.targetTimestamp === soonestTargetTimestamp;
-                    const isHelperAssignedHere =
-                      builderApprentice.assignedSlot === item.builderIndex;
-                    const isApprenticeActiveHere =
-                      isBuilderHelperWorking && isHelperAssignedHere;
+                  {[...displayedBuilderResults]
+                    .sort((a, b) => {
+                      const aPreview = builderPreview?.computedResults.find(
+                        (p) => p.builderIndex === a.builderIndex
+                      );
+                      const bPreview = builderPreview?.computedResults.find(
+                        (p) => p.builderIndex === b.builderIndex
+                      );
+                      const aTs =
+                        pendingBuilderPotions > 0 && aPreview
+                          ? aPreview.targetTimestamp
+                          : a.targetTimestamp;
+                      const bTs =
+                        pendingBuilderPotions > 0 && bPreview
+                          ? bPreview.targetTimestamp
+                          : b.targetTimestamp;
+                      const aFinished = aTs <= nowTick;
+                      const bFinished = bTs <= nowTick;
+                      // Always place active (unfinished) upgrades at the top, sorted by soonest finishing first
+                      if (aFinished !== bFinished) {
+                        return aFinished ? 1 : -1;
+                      }
+                      return aTs - bTs;
+                    })
+                    .map((item, idx) => {
+                      const previewMatch = builderPreview?.computedResults.find(
+                        (p) => p.builderIndex === item.builderIndex
+                      );
+                      const effectiveItemTargetTs =
+                        pendingBuilderPotions > 0 && previewMatch
+                          ? previewMatch.targetTimestamp
+                          : item.targetTimestamp;
+                      const displayDate =
+                        pendingBuilderPotions > 0 && previewMatch
+                          ? previewMatch.formattedDate
+                          : item.formattedDate;
+                      const isFinishingNext =
+                        effectiveItemTargetTs > nowTick &&
+                        soonestTargetTimestamp !== null &&
+                        effectiveItemTargetTs === soonestTargetTimestamp;
+                      const isHelperAssignedHere =
+                        builderApprentice.assignedSlot === item.builderIndex;
+                      const isApprenticeActiveHere =
+                        isBuilderHelperWorking && isHelperAssignedHere;
 
-                    return (
-                      <LedgerUpgradeQueueCard
-                        key={`${item.builderIndex}-${item.targetTimestamp}-${idx}`}
-                        rawId={item.rawId}
-                        upgradeTitle={item.upgradeTitle}
-                        upgradeLevel={item.upgradeLevel}
-                        slotBadge={item.slotBadge}
-                        isGoblin={item.isGoblin}
-                        isFinishingNext={isFinishingNext}
-                        category="builders"
-                        targetTimestamp={item.targetTimestamp}
-                        displayDate={displayDate}
-                        helper={builderApprentice}
-                        isHelperAssignedToSlot={isHelperAssignedHere}
-                        helperIcon="👷"
-                        helperBoostEndTime={
-                          isApprenticeActiveHere
-                            ? builderHelperCycleNow.activeRemSec > 0
-                              ? nowTick + builderHelperCycleNow.activeRemSec * 1000
-                              : builderApprentice.activeSessionEndTime
-                            : null
-                        }
-                        helperSpeedMultiplier={getHelperSpeedMultiplier(
-                          builderApprentice.level
-                        )}
-                        potionBoostEndTime={builderBoostEndTime}
-                        potionSpeedMultiplier={10}
-                        onActionClick={() => setAssignModalType('builder')}
-                        onFinish={() => handleBuilderUpgradeFinished(item.builderIndex)}
-                      />
-                    );
-                  })}
+                      return (
+                        <LedgerUpgradeQueueCard
+                          key={`${item.builderIndex}-${item.targetTimestamp}-${idx}`}
+                          rawId={item.rawId}
+                          upgradeTitle={item.upgradeTitle}
+                          upgradeLevel={item.upgradeLevel}
+                          slotBadge={item.slotBadge}
+                          isGoblin={item.isGoblin}
+                          isFinishingNext={isFinishingNext}
+                          category="builders"
+                          targetTimestamp={effectiveItemTargetTs}
+                          displayDate={displayDate}
+                          helper={builderApprentice}
+                          isHelperAssignedToSlot={isHelperAssignedHere}
+                          helperIcon="👷"
+                          helperBoostEndTime={
+                            isApprenticeActiveHere
+                              ? builderHelperCycleNow.activeRemSec > 0
+                                ? nowTick + builderHelperCycleNow.activeRemSec * 1000
+                                : builderApprentice.activeSessionEndTime
+                              : null
+                          }
+                          helperSpeedMultiplier={getHelperSpeedMultiplier(
+                            builderApprentice.level
+                          )}
+                          potionBoostEndTime={builderBoostEndTime}
+                          potionSpeedMultiplier={10}
+                          onActionClick={() => setAssignModalType('builder')}
+                          onFinish={() => handleBuilderUpgradeFinished(item.builderIndex)}
+                        />
+                      );
+                    })}
                 </div>
               ) : (
                 <div className="ledger-queue-card p-5 text-center space-y-2">
@@ -8460,7 +8522,7 @@ export default function App() {
                       slotBadge="[LAB]"
                       isGoblin={false}
                       category="laboratory"
-                      targetTimestamp={targetLabTimestamp}
+                      targetTimestamp={effectiveLabMainTimestamp || targetLabTimestamp}
                       displayDate={displayedLabDate}
                       helper={labApprentice}
                       isHelperAssignedToSlot={labApprentice.assignedSlot === 'main'}
@@ -8488,7 +8550,7 @@ export default function App() {
                       slotBadge="• GOBLIN"
                       isGoblin={true}
                       category="laboratory"
-                      targetTimestamp={targetGoblinLabTimestamp}
+                      targetTimestamp={effectiveLabGoblinTimestamp || targetGoblinLabTimestamp}
                       displayDate={displayedGoblinLabDate}
                       helper={labApprentice}
                       isHelperAssignedToSlot={labApprentice.assignedSlot === 'goblin'}
@@ -8557,7 +8619,7 @@ export default function App() {
                   slotBadge="[PET]"
                   isGoblin={false}
                   category="pethouse"
-                  targetTimestamp={targetPetTimestamp}
+                  targetTimestamp={effectivePetTimestamp || targetPetTimestamp}
                   displayDate={displayedPetDate}
                   potionBoostEndTime={petBoostEndTime}
                   potionSpeedMultiplier={24}
@@ -9576,7 +9638,8 @@ export default function App() {
                             <UpgradeAssetIcon
                               rawId={itemId}
                               upgradeTitle={entry.name}
-                              upgradeLevel={entry.currentLevel}
+                              upgradeLevel={entry.startLevel}
+                              targetLevel={entry.currentLevel}
                               className="!w-12 !h-12"
                             />
                             <div className="min-w-0">
