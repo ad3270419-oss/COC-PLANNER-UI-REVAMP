@@ -5,7 +5,12 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { LocalNotifications } from '@capacitor/local-notifications';
-import { ITEM_NAMES_BY_ID, UpgradeAssetIcon, getTownHallIconSrc } from './cocAssets';
+import {
+  ITEM_NAMES_BY_ID,
+  UpgradeAssetIcon,
+  getTownHallIconSrc,
+  resolveUpgradeIconSources,
+} from './cocAssets';
 
 export const COC_NAMES: Record<string | number, string> = {
   // Town Hall & Key Buildings
@@ -2433,15 +2438,20 @@ function formatWidgetCompactDay(timestamp: number, now = Date.now()): string {
   });
 }
 
-function resolveWidgetThLabel(d: SavedState, profileName: string): string {
-  if (typeof d.thLevel === 'number' && d.thLevel >= 1) {
-    return `[TH ${d.thLevel}]`;
+function resolveWidgetThNumber(d: SavedState, profileName: string): number {
+  if (typeof d.thLevel === 'number' && d.thLevel >= 1 && d.thLevel <= 18) {
+    return Math.floor(d.thLevel);
   }
   const nameMatch = profileName.match(/TH\s*(\d{1,2})/i);
   if (nameMatch && nameMatch[1]) {
-    return `[TH ${nameMatch[1]}]`;
+    const parsed = parseInt(nameMatch[1], 10);
+    if (parsed >= 1 && parsed <= 18) return parsed;
   }
-  return '[TH --]';
+  return 17;
+}
+
+function resolveWidgetThLabel(d: SavedState, profileName: string): string {
+  return `[TH ${resolveWidgetThNumber(d, profileName)}]`;
 }
 
 function syncAllVillagesToNativeWidget(
@@ -2457,7 +2467,9 @@ function syncAllVillagesToNativeWidget(
 
     const widgetVillagesPayload = allAccounts.map((profile) => {
       const d = profile.data || createDefaultSavedState();
+      const thNumber = resolveWidgetThNumber(d, profile.name);
       const thLevel = resolveWidgetThLabel(d, profile.name);
+      const thIcon = getTownHallIconSrc(thNumber);
       const tag = profile.tag?.trim() || '#VILLAGE';
 
       const activeResults = (d.lockedResults || [])
@@ -2467,26 +2479,26 @@ function syncAllVillagesToNativeWidget(
       const regularCap = Math.min(6, Math.max(1, d.numBuilders || 6));
       const busyRegularCount = activeResults.filter((r) => !r.isGoblin).length;
       const isGoblinBusy = activeResults.some((r) => r.isGoblin);
-      const freeRegularCount = Math.max(0, regularCap - busyRegularCount);
 
-      let buildersStatus = '';
-      if (freeRegularCount === 0) {
-        buildersStatus = isGoblinBusy
-          ? `${busyRegularCount}/${regularCap} + Goblin Busy`
-          : `${busyRegularCount}/${regularCap} Busy`;
-      } else {
-        buildersStatus = `${busyRegularCount}/${regularCap} Active (${freeRegularCount} Free)`;
-      }
+      const headerSubtitle = `TH ${thNumber} · ${busyRegularCount}/${regularCap} BUILDERS${
+        isGoblinBusy ? ' + G' : ''
+      }`;
+      const buildersSectionHeader = `BUILDERS  ${busyRegularCount}/${regularCap}${
+        isGoblinBusy ? ' + Goblin' : ''
+      }`;
+      const buildersStatus = `${busyRegularCount}/${regularCap} BUILDERS${
+        isGoblinBusy ? ' + G' : ''
+      }`;
 
       const activeBoostParts: string[] = [];
       if (d.builderBoostEndTime && d.builderBoostEndTime > now) {
-        activeBoostParts.push('Builder Potion Active (10x)');
+        activeBoostParts.push('Builder 10x Active');
       }
       if (d.labBoostEndTime && d.labBoostEndTime > now) {
-        activeBoostParts.push('Research Potion Active (24x)');
+        activeBoostParts.push('Lab 24x Active');
       }
       if (d.petBoostEndTime && d.petBoostEndTime > now) {
-        activeBoostParts.push('Pet Potion Active (24x)');
+        activeBoostParts.push('Pet 24x Active');
       }
       const bHelperCycle = getHelperCycleStateAt(d.builderApprentice, now);
       const lHelperCycle = getHelperCycleStateAt(d.labApprentice, now);
@@ -2498,7 +2510,7 @@ function syncAllVillagesToNativeWidget(
       }
 
       const boostStatus =
-        activeBoostParts.length > 0 ? activeBoostParts[0] : 'No Active Boosts';
+        activeBoostParts.length > 0 ? activeBoostParts.join(' · ') : 'No active boosts';
 
       let labStatus = 'Idle';
       if (d.targetLabTimestamp && d.targetLabTimestamp > now) {
@@ -2512,13 +2524,14 @@ function syncAllVillagesToNativeWidget(
         )})`;
       }
 
-      let petStatus = '';
+      let petStatus = 'Idle';
       if (d.targetPetTimestamp && d.targetPetTimestamp > now) {
         const petName = d.petTimer?.upgradeTitle || 'Pet';
         petStatus = `${petName} (${formatWidgetCompactDay(d.targetPetTimestamp, now)})`;
       }
 
-      const upgrades = activeResults.slice(0, 4).map((item) => {
+      // 1. All active Builder upgrades (up to 7: 6 regular + Goblin)
+      const builderUpgrades = activeResults.map((item) => {
         const isHero = Boolean(item.rawId && String(item.rawId).startsWith('28'));
         const badgeType = item.isGoblin ? 'green' : isHero ? 'purple' : 'gold';
         const slotBadge =
@@ -2528,26 +2541,160 @@ function syncAllVillagesToNativeWidget(
             : isHero
             ? '[HERO]'
             : `[B${(item.builderIndex ?? 0) + 1}]`);
+        const baseName = item.upgradeTitle || (item.isGoblin ? 'Goblin Builder' : 'Upgrade');
+        const displayTitle = item.isGoblin ? `${baseName} · G` : baseName;
         const targetLvl =
-          typeof item.upgradeLevel === 'number'
-            ? `LVL ${item.upgradeLevel} → LVL ${item.upgradeLevel + 1}`
-            : '';
+          typeof item.upgradeLevel === 'number' ? `→ ${item.upgradeLevel + 1}` : '';
+        const iconCandidates = resolveUpgradeIconSources({
+          rawId: item.rawId,
+          upgradeTitle: baseName,
+          upgradeLevel: item.upgradeLevel,
+          category: 'builders',
+        });
 
         return {
+          category: 'builders',
           slotBadge,
           badgeType,
-          name: item.upgradeTitle || (item.isGoblin ? 'Goblin Builder' : 'Upgrade'),
+          name: displayTitle,
+          rawId: item.rawId,
+          upgradeLevel: item.upgradeLevel,
           targetLvl,
+          targetTimestamp: item.targetTimestamp,
           finishFormatted: formatCompletionDate(item.targetTimestamp),
+          iconFile: iconCandidates[0] || '/icons/art_1000015.webp',
+          iconCandidates,
         };
       });
+
+      // 2. Active Laboratory upgrades (Main Lab + Goblin Researcher)
+      const labAndPetUpgrades: Array<{
+        category: string;
+        slotBadge: string;
+        badgeType: string;
+        name: string;
+        rawId?: number | string;
+        upgradeLevel?: number;
+        targetLvl: string;
+        targetTimestamp: number;
+        finishFormatted: string;
+        iconFile: string;
+        iconCandidates: string[];
+      }> = [];
+
+      if (d.targetLabTimestamp && d.targetLabTimestamp > now) {
+        const baseLabTitle =
+          d.labTimer?.upgradeTitle && d.labTimer.upgradeTitle !== 'Troop / Spell Upgrade'
+            ? d.labTimer.upgradeTitle
+            : d.labTimer?.rawId
+            ? resolveUpgradeName(d.labTimer.rawId, 'Lab Research')
+            : 'Lab Research';
+        const labTargetLvl =
+          typeof d.labTimer?.upgradeLevel === 'number'
+            ? `→ ${d.labTimer.upgradeLevel + 1}`
+            : '';
+        const labIcons = resolveUpgradeIconSources({
+          rawId: d.labTimer?.rawId,
+          upgradeTitle: baseLabTitle,
+          upgradeLevel: d.labTimer?.upgradeLevel,
+          category: 'laboratory',
+        });
+        labAndPetUpgrades.push({
+          category: 'laboratory',
+          slotBadge: '[LAB]',
+          badgeType: 'purple',
+          name: `${baseLabTitle} · LAB`,
+          rawId: d.labTimer?.rawId,
+          upgradeLevel: d.labTimer?.upgradeLevel,
+          targetLvl: labTargetLvl,
+          targetTimestamp: d.targetLabTimestamp,
+          finishFormatted: formatCompletionDate(d.targetLabTimestamp),
+          iconFile: labIcons[0] || '/icons/art_1000007.webp',
+          iconCandidates: labIcons,
+        });
+      }
+
+      if (d.targetGoblinLabTimestamp && d.targetGoblinLabTimestamp > now) {
+        const baseGobLabTitle =
+          d.goblinLabTimer?.upgradeTitle &&
+          d.goblinLabTimer.upgradeTitle !== 'Goblin Researcher'
+            ? d.goblinLabTimer.upgradeTitle
+            : d.goblinLabTimer?.rawId
+            ? resolveUpgradeName(d.goblinLabTimer.rawId, 'Goblin Lab')
+            : 'Goblin Lab';
+        const gobLabTargetLvl =
+          typeof d.goblinLabTimer?.upgradeLevel === 'number'
+            ? `→ ${d.goblinLabTimer.upgradeLevel + 1}`
+            : '';
+        const gobLabIcons = resolveUpgradeIconSources({
+          rawId: d.goblinLabTimer?.rawId,
+          upgradeTitle: baseGobLabTitle,
+          upgradeLevel: d.goblinLabTimer?.upgradeLevel,
+          category: 'laboratory',
+        });
+        labAndPetUpgrades.push({
+          category: 'laboratory',
+          slotBadge: '[G-LAB]',
+          badgeType: 'green',
+          name: `${baseGobLabTitle} · G-LAB`,
+          rawId: d.goblinLabTimer?.rawId,
+          upgradeLevel: d.goblinLabTimer?.upgradeLevel,
+          targetLvl: gobLabTargetLvl,
+          targetTimestamp: d.targetGoblinLabTimestamp,
+          finishFormatted: formatCompletionDate(d.targetGoblinLabTimestamp),
+          iconFile: gobLabIcons[0] || '/icons/art_1000007.webp',
+          iconCandidates: gobLabIcons,
+        });
+      }
+
+      // 3. Active Pet House upgrade
+      if (d.targetPetTimestamp && d.targetPetTimestamp > now) {
+        const basePetTitle =
+          d.petTimer?.upgradeTitle && d.petTimer.upgradeTitle !== 'Active Pet Upgrade'
+            ? d.petTimer.upgradeTitle
+            : d.petTimer?.rawId
+            ? resolveUpgradeName(d.petTimer.rawId, 'Pet Upgrade')
+            : 'Pet Upgrade';
+        const petTargetLvl =
+          typeof d.petTimer?.upgradeLevel === 'number'
+            ? `→ ${d.petTimer.upgradeLevel + 1}`
+            : '';
+        const petIcons = resolveUpgradeIconSources({
+          rawId: d.petTimer?.rawId,
+          upgradeTitle: basePetTitle,
+          upgradeLevel: d.petTimer?.upgradeLevel,
+          category: 'pethouse',
+        });
+        labAndPetUpgrades.push({
+          category: 'pethouse',
+          slotBadge: '[PET]',
+          badgeType: 'green',
+          name: `${basePetTitle} · PET`,
+          rawId: d.petTimer?.rawId,
+          upgradeLevel: d.petTimer?.upgradeLevel,
+          targetLvl: petTargetLvl,
+          targetTimestamp: d.targetPetTimestamp,
+          finishFormatted: formatCompletionDate(d.targetPetTimestamp),
+          iconFile: petIcons[0] || '/icons/art_1000068.webp',
+          iconCandidates: petIcons,
+        });
+      }
+
+      const upgrades = [...builderUpgrades, ...labAndPetUpgrades];
 
       return {
         name: profile.name,
         tag,
+        thNumber,
         thLevel,
+        thIcon,
+        headerSubtitle,
+        buildersSectionHeader,
         buildersStatus,
         boostStatus,
+        builderBoostEndTime: d.builderBoostEndTime || 0,
+        labBoostEndTime: d.labBoostEndTime || 0,
+        petBoostEndTime: d.petBoostEndTime || 0,
         labStatus,
         petStatus,
         upgrades,
@@ -3998,6 +4145,9 @@ export default function App() {
   const [jsonInputText, setJsonInputText] = useState<string>('');
   const [isBackupModalOpen, setIsBackupModalOpen] = useState<boolean>(false);
   const [backupRestoreInput, setBackupRestoreInput] = useState<string>('');
+  const [isWidgetPreviewOpen, setIsWidgetPreviewOpen] = useState<boolean>(false);
+  const [widgetPreviewIdx, setWidgetPreviewIdx] = useState<number>(0);
+  const [widgetRefreshTime, setWidgetRefreshTime] = useState<number>(() => Date.now());
   const jsonImportTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const backupRestoreTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -7255,14 +7405,21 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            {/* Monthly Time Saved Summary Button */}
+            {/* Home Screen Widget Live Preview & Sync Button */}
             <button
               type="button"
               onClick={() => {
                 triggerHaptic(15);
-                setSummaryModalSection('builders');
+                const curIdx = Math.max(
+                  0,
+                  accounts.findIndex((a) => a.id === activeAccountId)
+                );
+                setWidgetPreviewIdx(curIdx);
+                setWidgetRefreshTime(Date.now());
+                syncAllVillagesToNativeWidget(accounts, activeAccountId);
+                setIsWidgetPreviewOpen(true);
               }}
-              title="Monthly Potion & Time Saved Summary"
+              title="Home Screen Widget Preview & Sync"
               className="tactile w-11 h-11 rounded-2xl bg-[#161B26] hover:bg-[#1E2534] border border-[#2A303C] flex items-center justify-center text-[#F3CA65] cursor-pointer shadow-sm"
             >
               <svg
@@ -9964,6 +10121,378 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Interactive Home Screen Widget Preview & Sync Modal */}
+      {isWidgetPreviewOpen && (() => {
+        const totalVillages = accounts.length;
+        const safeIdx =
+          totalVillages > 0 ? ((widgetPreviewIdx % totalVillages) + totalVillages) % totalVillages : 0;
+        const previewProfile = accounts[safeIdx] || activeAccountProfile;
+        const pd = previewProfile?.data || createDefaultSavedState();
+        const thNum = resolveWidgetThNumber(pd, previewProfile?.name || 'Village');
+        const now = widgetRefreshTime;
+
+        const activeBuilders = (pd.lockedResults || [])
+          .filter((r) => r && typeof r.targetTimestamp === 'number' && r.targetTimestamp > now)
+          .sort((a, b) => a.targetTimestamp - b.targetTimestamp);
+
+        const regCap = Math.min(6, Math.max(1, pd.numBuilders || 6));
+        const busyReg = activeBuilders.filter((r) => !r.isGoblin).length;
+        const goblinBusy = activeBuilders.some((r) => r.isGoblin);
+
+        const boostParts: string[] = [];
+        if (pd.builderBoostEndTime && pd.builderBoostEndTime > now) {
+          const remM = Math.max(1, Math.floor((pd.builderBoostEndTime - now) / 60000));
+          const h = Math.floor(remM / 60);
+          const m = remM % 60;
+          boostParts.push(`Builder 10x (${h > 0 ? `${h}h ${m}m` : `${m}m`})`);
+        }
+        if (pd.labBoostEndTime && pd.labBoostEndTime > now) {
+          const remM = Math.max(1, Math.floor((pd.labBoostEndTime - now) / 60000));
+          const h = Math.floor(remM / 60);
+          const m = remM % 60;
+          boostParts.push(`Lab 24x (${h > 0 ? `${h}h ${m}m` : `${m}m`})`);
+        }
+        if (pd.petBoostEndTime && pd.petBoostEndTime > now) {
+          const remM = Math.max(1, Math.floor((pd.petBoostEndTime - now) / 60000));
+          const h = Math.floor(remM / 60);
+          const m = remM % 60;
+          boostParts.push(`Pet 24x (${h > 0 ? `${h}h ${m}m` : `${m}m`})`);
+        }
+
+        const labAndPetRows: Array<{
+          key: string;
+          title: string;
+          targetLvl: string;
+          targetTs: number;
+          rawId?: number | string;
+          upgradeLevel?: number;
+          category: 'laboratory' | 'pethouse';
+        }> = [];
+
+        if (pd.targetLabTimestamp && pd.targetLabTimestamp > now) {
+          const baseLabName =
+            pd.labTimer?.upgradeTitle && pd.labTimer.upgradeTitle !== 'Troop / Spell Upgrade'
+              ? pd.labTimer.upgradeTitle
+              : pd.labTimer?.rawId
+              ? resolveUpgradeName(pd.labTimer.rawId, 'Lab Research')
+              : 'Lab Research';
+          labAndPetRows.push({
+            key: 'lab_main',
+            title: `${baseLabName} · LAB`,
+            targetLvl:
+              typeof pd.labTimer?.upgradeLevel === 'number'
+                ? `→ ${pd.labTimer.upgradeLevel + 1}`
+                : '',
+            targetTs: pd.targetLabTimestamp,
+            rawId: pd.labTimer?.rawId,
+            upgradeLevel: pd.labTimer?.upgradeLevel,
+            category: 'laboratory',
+          });
+        }
+
+        if (pd.targetGoblinLabTimestamp && pd.targetGoblinLabTimestamp > now) {
+          const baseGobLabName =
+            pd.goblinLabTimer?.upgradeTitle &&
+            pd.goblinLabTimer.upgradeTitle !== 'Goblin Researcher'
+              ? pd.goblinLabTimer.upgradeTitle
+              : pd.goblinLabTimer?.rawId
+              ? resolveUpgradeName(pd.goblinLabTimer.rawId, 'Goblin Lab')
+              : 'Goblin Lab';
+          labAndPetRows.push({
+            key: 'lab_goblin',
+            title: `${baseGobLabName} · G-LAB`,
+            targetLvl:
+              typeof pd.goblinLabTimer?.upgradeLevel === 'number'
+                ? `→ ${pd.goblinLabTimer.upgradeLevel + 1}`
+                : '',
+            targetTs: pd.targetGoblinLabTimestamp,
+            rawId: pd.goblinLabTimer?.rawId,
+            upgradeLevel: pd.goblinLabTimer?.upgradeLevel,
+            category: 'laboratory',
+          });
+        }
+
+        if (pd.targetPetTimestamp && pd.targetPetTimestamp > now) {
+          const basePetName =
+            pd.petTimer?.upgradeTitle && pd.petTimer.upgradeTitle !== 'Active Pet Upgrade'
+              ? pd.petTimer.upgradeTitle
+              : pd.petTimer?.rawId
+              ? resolveUpgradeName(pd.petTimer.rawId, 'Pet Upgrade')
+              : 'Pet Upgrade';
+          labAndPetRows.push({
+            key: 'pet_main',
+            title: `${basePetName} · PET`,
+            targetLvl:
+              typeof pd.petTimer?.upgradeLevel === 'number'
+                ? `→ ${pd.petTimer.upgradeLevel + 1}`
+                : '',
+            targetTs: pd.targetPetTimestamp,
+            rawId: pd.petTimer?.rawId,
+            upgradeLevel: pd.petTimer?.upgradeLevel,
+            category: 'pethouse',
+          });
+        }
+
+        const formatSubFinishDate = (ts: number) => {
+          const dObj = new Date(ts);
+          const dd = String(dObj.getDate()).padStart(2, '0');
+          const mm = String(dObj.getMonth() + 1).padStart(2, '0');
+          const yyyy = dObj.getFullYear();
+          const timeStr = dObj
+            .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+            .toLowerCase();
+          return `Finishes ${dd}/${mm}/${yyyy} ${timeStr}`;
+        };
+
+        const calcBarPercent = (ts: number) => {
+          const remSec = Math.max(0, (ts - now) / 1000);
+          const maxRef = Math.max(remSec, 14 * 86400);
+          return Math.min(95, Math.max(12, Math.round(100 - (remSec / maxRef) * 85)));
+        };
+
+        const updatedTimeStr = new Date(now)
+          .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+          .toLowerCase();
+
+        return (
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
+            onClick={() => setIsWidgetPreviewOpen(false)}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="w-full max-w-md space-y-3"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Exact Home Screen Widget Container */}
+              <div className="rounded-[22px] bg-[#121622] border border-[#262F42] p-3.5 shadow-[0_20px_50px_rgba(0,0,0,0.9)] space-y-2.5 max-h-[80dvh] flex flex-col">
+                {/* 1. Widget Header: 3D TH Icon + Village Name (NO Tag) + Switch Button + Refresh Button */}
+                <div className="flex items-center gap-2.5 shrink-0">
+                  <img
+                    src={getTownHallIconSrc(thNum)}
+                    alt={`Town Hall ${thNum}`}
+                    className="w-11 h-11 object-contain shrink-0 drop-shadow-md"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-[17px] font-black text-white leading-tight truncate">
+                      {previewProfile?.name || 'Village'}
+                    </h3>
+                    <p className="text-[11px] font-extrabold text-[#F3CA65] tracking-wide uppercase mt-0.5 truncate">
+                      TH {thNum} · {busyReg}/{regCap} BUILDERS{goblinBusy ? ' + G' : ''}
+                    </p>
+                  </div>
+
+                  {/* Account Switch Button (⇄) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(12);
+                      const nextIdx = totalVillages > 0 ? (safeIdx + 1) % totalVillages : 0;
+                      setWidgetPreviewIdx(nextIdx);
+                      setWidgetRefreshTime(Date.now());
+                      if (accounts[nextIdx]) {
+                        syncAllVillagesToNativeWidget(accounts, accounts[nextIdx].id);
+                      }
+                    }}
+                    title="Switch Widget Account"
+                    className="tactile h-9 px-2.5 rounded-xl bg-[#1A202E] hover:bg-[#222A3C] border border-[#2E384D] text-[#F3CA65] text-xs font-extrabold flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    ⇄ {safeIdx + 1}/{Math.max(1, totalVillages)}
+                  </button>
+
+                  {/* One-Tap Refresh Button (↻) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(15);
+                      setWidgetRefreshTime(Date.now());
+                      syncAllVillagesToNativeWidget(
+                        accounts,
+                        previewProfile?.id || activeAccountId
+                      );
+                      showToast('success', 'Widget refreshed & synced!');
+                    }}
+                    title="One-Tap Refresh Widget"
+                    className="tactile w-9 h-9 rounded-xl bg-[#1A202E] hover:bg-[#222A3C] border border-[#2E384D] text-[#F3CA65] text-base font-extrabold flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    ↻
+                  </button>
+                </div>
+
+                {/* 2. Boost Banner Box */}
+                <div className="rounded-xl bg-[#1A172B] border border-[#4C3B78] px-3 py-2 flex items-center gap-2 shrink-0">
+                  <span className="text-[#F3CA65] text-sm">🕒</span>
+                  <span
+                    className={`text-xs font-bold truncate ${
+                      boostParts.length > 0 ? 'text-[#4ADE80]' : 'text-[#CBD5E1]'
+                    }`}
+                  >
+                    {boostParts.length > 0 ? boostParts.join(' · ') : 'No active boosts'}
+                  </span>
+                </div>
+
+                {/* 3. Scrollable Upgrade Cards (Builders + Lab + Pets) */}
+                <div className="overflow-y-auto space-y-2 pr-0.5 flex-1">
+                  {activeBuilders.length === 0 && labAndPetRows.length === 0 ? (
+                    <div className="rounded-2xl bg-[#181E2C] border border-[#263044] p-5 text-center text-xs font-bold text-[#94A3B8]">
+                      All Builders, Lab &amp; Pets Idle
+                    </div>
+                  ) : (
+                    <>
+                      {activeBuilders.length > 0 && (
+                        <div className="space-y-1.5">
+                          <p className="text-[11px] font-extrabold text-[#F3CA65] tracking-wider px-0.5">
+                            BUILDERS &nbsp;{busyReg}/{regCap}
+                            {goblinBusy ? ' + Goblin' : ''}
+                          </p>
+                          {activeBuilders.map((item) => {
+                            const baseTitle =
+                              item.upgradeTitle ||
+                              (item.isGoblin ? 'Goblin Builder' : 'Upgrade');
+                            const titleWithTag = item.isGoblin
+                              ? `${baseTitle} · G`
+                              : baseTitle;
+                            const targetLvl =
+                              typeof item.upgradeLevel === 'number'
+                                ? `→ ${item.upgradeLevel + 1}`
+                                : '';
+                            return (
+                              <div
+                                key={`${item.builderIndex}_${item.targetTimestamp}`}
+                                className="rounded-[14px] bg-[#181E2C] border border-[#263044] px-2.5 py-2.5 flex items-center gap-2.5"
+                              >
+                                <UpgradeAssetIcon
+                                  rawId={item.rawId}
+                                  upgradeTitle={baseTitle}
+                                  upgradeLevel={item.upgradeLevel}
+                                  category="builders"
+                                  className="!w-11 !h-11 !rounded-xl !bg-transparent !border-0 !p-0 !shadow-none"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-[13.5px] font-bold text-white truncate">
+                                      {titleWithTag}
+                                    </p>
+                                    {targetLvl && (
+                                      <span className="text-[12.5px] font-extrabold text-[#F3CA65] shrink-0">
+                                        {targetLvl}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[13.5px] font-extrabold text-[#4ADE80] leading-tight mt-0.5">
+                                    {formatCompletionDate(item.targetTimestamp)}
+                                  </p>
+                                  <div className="w-full h-[3px] rounded-full bg-[#252D3D] overflow-hidden mt-1.5">
+                                    <div
+                                      className="h-full bg-[#4ADE80] rounded-full"
+                                      style={{
+                                        width: `${calcBarPercent(item.targetTimestamp)}%`,
+                                      }}
+                                    />
+                                  </div>
+                                  <p className="text-[10.5px] font-medium text-[#8E9AA8] mt-1 truncate">
+                                    {formatSubFinishDate(item.targetTimestamp)}
+                                  </p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {labAndPetRows.length > 0 && (
+                        <div className="space-y-1.5 pt-1">
+                          <p className="text-[11px] font-extrabold text-[#F3CA65] tracking-wider px-0.5">
+                            LAB &amp; PETS &nbsp;{labAndPetRows.length} Active
+                          </p>
+                          {labAndPetRows.map((row) => (
+                            <div
+                              key={row.key}
+                              className="rounded-[14px] bg-[#181E2C] border border-[#263044] px-2.5 py-2.5 flex items-center gap-2.5"
+                            >
+                              <UpgradeAssetIcon
+                                rawId={row.rawId}
+                                upgradeTitle={row.title.replace(/ · (LAB|G-LAB|PET)$/, '')}
+                                upgradeLevel={row.upgradeLevel}
+                                category={row.category}
+                                className="!w-11 !h-11 !rounded-xl !bg-transparent !border-0 !p-0 !shadow-none"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-[13.5px] font-bold text-white truncate">
+                                    {row.title}
+                                  </p>
+                                  {row.targetLvl && (
+                                    <span className="text-[12.5px] font-extrabold text-[#F3CA65] shrink-0">
+                                      {row.targetLvl}
+                                    </span>
+                                  )}
+                                </div>
+                                <p
+                                  className={`text-[13.5px] font-extrabold leading-tight mt-0.5 ${
+                                    row.category === 'laboratory'
+                                      ? 'text-[#60A5FA]'
+                                      : 'text-[#4ADE80]'
+                                  }`}
+                                >
+                                  {formatCompletionDate(row.targetTs)}
+                                </p>
+                                <div className="w-full h-[3px] rounded-full bg-[#252D3D] overflow-hidden mt-1.5">
+                                  <div
+                                    className="h-full bg-[#4ADE80] rounded-full"
+                                    style={{ width: `${calcBarPercent(row.targetTs)}%` }}
+                                  />
+                                </div>
+                                <p className="text-[10.5px] font-medium text-[#8E9AA8] mt-1 truncate">
+                                  {formatSubFinishDate(row.targetTs)}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* 4. Widget Footer */}
+                <div className="flex items-center justify-between pt-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(12);
+                      if (previewProfile && previewProfile.id !== activeAccountId) {
+                        handleAccountChipClick(previewProfile);
+                      }
+                      setIsWidgetPreviewOpen(false);
+                    }}
+                    className="text-[10.5px] font-extrabold tracking-wider text-[#CBD5E1] hover:text-white uppercase cursor-pointer"
+                  >
+                    OPEN VILLAGE &nbsp;↗
+                  </button>
+                  <span className="text-[10.5px] font-bold text-[#8E9AA8] uppercase">
+                    UPDATED {updatedTimeStr}
+                  </span>
+                </div>
+              </div>
+
+              {/* Close Modal Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  setIsWidgetPreviewOpen(false);
+                }}
+                className="tactile w-full py-2.5 rounded-2xl font-extrabold text-xs sm:text-sm bg-[#161B26] hover:bg-[#1E2534] text-[#CBD5E1] border border-[#2A303C] cursor-pointer"
+              >
+                Close Widget Preview
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

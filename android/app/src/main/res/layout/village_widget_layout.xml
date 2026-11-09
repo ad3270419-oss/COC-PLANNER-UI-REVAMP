@@ -2,508 +2,187 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
+    android:layout_height="match_parent"
     android:background="@drawable/widget_card_bg"
     android:orientation="vertical"
-    android:paddingLeft="10dp"
-    android:paddingTop="9dp"
-    android:paddingRight="10dp"
-    android:paddingBottom="9dp">
+    android:paddingLeft="13dp"
+    android:paddingTop="12dp"
+    android:paddingRight="13dp"
+    android:paddingBottom="10dp">
 
-    <!-- 1. HEADER BAR: [TH {lvl}] Capsule, Player Tag, Village Name & [ ⇄ X/Y ] Switch Button -->
+    <!-- 1. HEADER ROW: 3D Town Hall Icon, Village Name (NO TAG), TH + Builders Subtitle, Account Switch & One-Tap Refresh -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingBottom="5dp">
-
-        <TextView
-            android:id="@+id/widget_th_level"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:background="@drawable/capsule_gold"
-            android:paddingLeft="6dp"
-            android:paddingTop="2dp"
-            android:paddingRight="6dp"
-            android:paddingBottom="2dp"
-            android:singleLine="true"
-            android:text="[TH --]"
-            android:textColor="#FBBF24"
-            android:textSize="10.5sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_player_tag"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="6dp"
-            android:singleLine="true"
-            android:text="#VILLAGE"
-            android:textColor="#C084FC"
-            android:textSize="11sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_village_name"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="6dp"
-            android:layout_weight="1"
-            android:ellipsize="end"
-            android:singleLine="true"
-            android:text="Main Account"
-            android:textColor="#FFFFFF"
-            android:textSize="11sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_btn_switch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="6dp"
-            android:background="@drawable/widget_switch_bg"
-            android:paddingLeft="8dp"
-            android:paddingTop="3dp"
-            android:paddingRight="8dp"
-            android:paddingBottom="3dp"
-            android:singleLine="true"
-            android:text="[ ⇄ ]"
-            android:textColor="#FBBF24"
-            android:textSize="10.5sp"
-            android:textStyle="bold" />
-    </LinearLayout>
-
-    <!-- 2. VILLAGE STATUS SUBHEADER: Builder Status & Active Boost -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="@drawable/widget_section_bg"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingLeft="8dp"
-        android:paddingTop="4dp"
-        android:paddingRight="8dp"
-        android:paddingBottom="4dp">
-
-        <TextView
-            android:id="@+id/widget_builders_status"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:singleLine="true"
-            android:text="Builders: 0/6 Busy"
-            android:textColor="#FBBF24"
-            android:textSize="10.5sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_boost_status"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="6dp"
-            android:singleLine="true"
-            android:text="No Active Boosts"
-            android:textColor="#94A3B8"
-            android:textSize="10sp"
-            android:textStyle="bold" />
-    </LinearLayout>
-
-    <!-- 3. SINGLE-LINE LAB & PET SUMMARY ROW: [LAB] ... | [PET] ... -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:background="@drawable/widget_section_bg"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingLeft="8dp"
-        android:paddingTop="4dp"
-        android:paddingRight="8dp"
-        android:paddingBottom="4dp">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:background="@drawable/capsule_purple"
-            android:paddingLeft="5dp"
-            android:paddingTop="1dp"
-            android:paddingRight="5dp"
-            android:paddingBottom="1dp"
-            android:text="[LAB]"
-            android:textColor="#E879F9"
-            android:textSize="9.5sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_lab_status"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="5dp"
-            android:layout_weight="1"
-            android:ellipsize="end"
-            android:singleLine="true"
-            android:text="Idle"
-            android:textColor="#FFFFFF"
-            android:textSize="10.5sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="6dp"
-            android:layout_marginRight="6dp"
-            android:text="|"
-            android:textColor="#475569"
-            android:textSize="10.5sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:background="@drawable/capsule_green"
-            android:paddingLeft="5dp"
-            android:paddingTop="1dp"
-            android:paddingRight="5dp"
-            android:paddingBottom="1dp"
-            android:text="[PET]"
-            android:textColor="#34D399"
-            android:textSize="9.5sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_pet_status"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="5dp"
-            android:layout_weight="1"
-            android:ellipsize="end"
-            android:singleLine="true"
-            android:text="Idle"
-            android:textColor="#FFFFFF"
-            android:textSize="10.5sp"
-            android:textStyle="bold" />
-    </LinearLayout>
-
-    <!-- 4. COMPACT TWO-COLUMN UPGRADE LIST (wraps content tightly, zero empty vertical gap) -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:background="@drawable/widget_section_bg"
-        android:orientation="vertical"
-        android:paddingLeft="8dp"
-        android:paddingTop="4dp"
-        android:paddingRight="8dp"
-        android:paddingBottom="4dp">
-
-        <!-- Empty Fallback -->
-        <TextView
-            android:id="@+id/widget_upgrades_empty"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp"
-            android:text="All Builders Available"
-            android:textColor="#94A3B8"
-            android:textSize="11sp"
-            android:textStyle="bold" />
-
-        <!-- Row 1 -->
-        <LinearLayout
-            android:id="@+id/widget_upgrade_row_1"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp"
-            android:visibility="gone">
-
-            <TextView
-                android:id="@+id/widget_upgrade_badge_1"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/capsule_gold"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="[B1]"
-                android:textColor="#FBBF24"
-                android:textSize="9.5sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_title_1"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="6dp"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="Upgrade"
-                android:textColor="#FFFFFF"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_lvl_1"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="5dp"
-                android:background="@drawable/capsule_lvl"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="LVL 1 → LVL 2"
-                android:textColor="#FBBF24"
-                android:textSize="9sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_finish_1"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="7dp"
-                android:singleLine="true"
-                android:text="Nov 9, 8:55 AM"
-                android:textColor="#F59E0B"
-                android:textSize="10.5sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <!-- Row 2 -->
-        <LinearLayout
-            android:id="@+id/widget_upgrade_row_2"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp"
-            android:visibility="gone">
-
-            <TextView
-                android:id="@+id/widget_upgrade_badge_2"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/capsule_gold"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="[B2]"
-                android:textColor="#FBBF24"
-                android:textSize="9.5sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_title_2"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="6dp"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="Upgrade"
-                android:textColor="#FFFFFF"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_lvl_2"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="5dp"
-                android:background="@drawable/capsule_lvl"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="LVL 1 → LVL 2"
-                android:textColor="#FBBF24"
-                android:textSize="9sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_finish_2"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="7dp"
-                android:singleLine="true"
-                android:text="Nov 9, 2:59 PM"
-                android:textColor="#F59E0B"
-                android:textSize="10.5sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <!-- Row 3 -->
-        <LinearLayout
-            android:id="@+id/widget_upgrade_row_3"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp"
-            android:visibility="gone">
-
-            <TextView
-                android:id="@+id/widget_upgrade_badge_3"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/capsule_gold"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="[B3]"
-                android:textColor="#FBBF24"
-                android:textSize="9.5sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_title_3"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="6dp"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="Upgrade"
-                android:textColor="#FFFFFF"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_lvl_3"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="5dp"
-                android:background="@drawable/capsule_lvl"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="LVL 1 → LVL 2"
-                android:textColor="#FBBF24"
-                android:textSize="9sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_finish_3"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="7dp"
-                android:singleLine="true"
-                android:text="Nov 9, 6:00 PM"
-                android:textColor="#F59E0B"
-                android:textSize="10.5sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <!-- Row 4 -->
-        <LinearLayout
-            android:id="@+id/widget_upgrade_row_4"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingTop="3dp"
-            android:paddingBottom="3dp"
-            android:visibility="gone">
-
-            <TextView
-                android:id="@+id/widget_upgrade_badge_4"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/capsule_gold"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="[B4]"
-                android:textColor="#FBBF24"
-                android:textSize="9.5sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_title_4"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="6dp"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="Upgrade"
-                android:textColor="#FFFFFF"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_lvl_4"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="5dp"
-                android:background="@drawable/capsule_lvl"
-                android:paddingLeft="5dp"
-                android:paddingTop="1dp"
-                android:paddingRight="5dp"
-                android:paddingBottom="1dp"
-                android:singleLine="true"
-                android:text="LVL 1 → LVL 2"
-                android:textColor="#FBBF24"
-                android:textSize="9sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_upgrade_finish_4"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="7dp"
-                android:singleLine="true"
-                android:text="Nov 10, 9:00 AM"
-                android:textColor="#F59E0B"
-                android:textSize="10.5sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-    </LinearLayout>
-
-    <!-- 5. COMPACT FOOTER BAR -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/widget_last_synced"
+        <ImageView
+            android:id="@+id/widget_th_icon"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginRight="10dp"
+            android:contentDescription="Town Hall"
+            android:scaleType="fitCenter"
+            android:src="@mipmap/ic_launcher" />
+
+        <LinearLayout
+            android:id="@+id/widget_header_title_box"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:orientation="vertical">
+
+            <!-- Village Name (replaces Player Tag per user request) -->
+            <TextView
+                android:id="@+id/widget_village_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="DEATH DELEAR"
+                android:textColor="#FFFFFF"
+                android:textSize="16.5sp"
+                android:textStyle="bold" />
+
+            <!-- TH & Builders Count Subtitle -->
+            <TextView
+                android:id="@+id/widget_builders_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="TH 17 · 6/6 BUILDERS + G"
+                android:textColor="#F3CA65"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Multi-Account Switch Button (Switch accounts without opening the app) -->
+        <TextView
+            android:id="@+id/widget_btn_switch"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginLeft="6dp"
+            android:background="@drawable/widget_action_btn_bg"
+            android:gravity="center"
+            android:paddingLeft="9dp"
+            android:paddingRight="9dp"
             android:singleLine="true"
-            android:text="Synced: --:--"
-            android:textColor="#64748B"
-            android:textSize="9.5sp" />
+            android:text="⇄ 1/1"
+            android:textColor="#F3CA65"
+            android:textSize="11.5sp"
+            android:textStyle="bold" />
+
+        <!-- One-Tap Refresh Button -->
+        <TextView
+            android:id="@+id/widget_btn_refresh"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:layout_marginLeft="6dp"
+            android:background="@drawable/widget_action_btn_bg"
+            android:gravity="center"
+            android:singleLine="true"
+            android:text="↻"
+            android:textColor="#F3CA65"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- 2. BOOST STATUS BANNER (Purple-bordered pill matching screenshot) -->
+    <LinearLayout
+        android:id="@+id/widget_boost_box"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="9dp"
+        android:background="@drawable/widget_boost_bg"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="11dp"
+        android:paddingTop="7dp"
+        android:paddingRight="11dp"
+        android:paddingBottom="7dp">
+
+        <TextView
+            android:id="@+id/widget_boost_clock"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginRight="8dp"
+            android:text="🕒"
+            android:textColor="#F3CA65"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/widget_boost_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="No active boosts"
+            android:textColor="#CBD5E1"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- 3. SCROLLABLE UPGRADE CARDS LIST (Builders + Laboratory + Pet House) -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="7dp"
+        android:layout_weight="1">
+
+        <ListView
+            android:id="@+id/widget_upgrades_list"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="0dp"
+            android:scrollbars="none" />
+
+        <TextView
+            android:id="@+id/widget_upgrades_empty"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@drawable/widget_item_card_bg"
+            android:gravity="center"
+            android:padding="14dp"
+            android:text="All Builders, Lab &amp; Pets Idle"
+            android:textColor="#94A3B8"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <!-- 4. FOOTER BAR: OPEN VILLAGE ↗ & UPDATED TIME -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
         <TextView
             android:id="@+id/widget_tap_hint"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:singleLine="true"
-            android:text="Tap to Open Clash Planner"
-            android:textColor="#94A3B8"
-            android:textSize="9.5sp"
+            android:text="OPEN VILLAGE  ↗"
+            android:textColor="#CBD5E1"
+            android:textSize="10.5sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_last_synced"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="right"
+            android:singleLine="true"
+            android:text="UPDATED --:--"
+            android:textColor="#8E9AA8"
+            android:textSize="10.5sp"
             android:textStyle="bold" />
     </LinearLayout>
 

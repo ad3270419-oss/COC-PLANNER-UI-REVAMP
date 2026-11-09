@@ -69,11 +69,18 @@
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
                 <action android:name="com.cocpotion.calculator.ACTION_SWITCH_WIDGET_ACCOUNT" />
+                <action android:name="com.cocpotion.calculator.ACTION_REFRESH_WIDGET" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/village_widget_info" />
         </receiver>
+
+        <!-- Scrollable Upgrade Cards Service for Home Screen Widget -->
+        <service
+            android:name=".VillageWidgetService"
+            android:permission="android.permission.BIND_REMOTEVIEWS"
+            android:exported="false" />
     </application>
 
     <!-- Permissions -->
