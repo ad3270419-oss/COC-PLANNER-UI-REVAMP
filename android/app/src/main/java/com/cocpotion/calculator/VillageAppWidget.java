@@ -268,11 +268,37 @@ public class VillageAppWidget extends AppWidgetProvider {
         return t;
     }
 
-    public static int resolveUpgradeDrawableResId(
+    private static boolean assetIconExists(Context context, String cleanEntryName) {
+        if (cleanEntryName == null || cleanEntryName.isEmpty()) return false;
+        AssetManager assets = context.getAssets();
+        String fileName = cleanEntryName + ".webp";
+        String[] paths = new String[] {
+            "public/icons/" + fileName,
+            "icons/" + fileName
+        };
+        for (String p : paths) {
+            InputStream is = null;
+            try {
+                is = assets.open(p);
+                return true;
+            } catch (Exception ignored) {
+                // Not at this path
+            } finally {
+                if (is != null) {
+                    try {
+                        is.close();
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        return false;
+    }
+
+    public static Uri resolveUpgradeIconUri(
         Context context,
         String displayTitle,
         String rawId,
-         String targetLvlText,
+        String targetLvlText,
         List<String> candidates,
         String fallbackFile
     ) {
@@ -330,30 +356,28 @@ public class VillageAppWidget extends AppWidgetProvider {
         }
 
         // 4. Category fallback
-        if (fallbackFile != null && !fallbackFile.isEmpty()) {
-            String fb = cleanDrawableEntryName(fallbackFile);
-            if (!fb.isEmpty() && !orderedNames.contains(fb)) {
-                orderedNames.add(fb);
-            }
+        String fallbackClean = cleanDrawableEntryName(
+            fallbackFile != null && !fallbackFile.isEmpty() ? fallbackFile : "art_1000015"
+        );
+        if (!fallbackClean.isEmpty() && !orderedNames.contains(fallbackClean)) {
+            orderedNames.add(fallbackClean);
         }
 
-        String pkg = context.getPackageName();
         for (String resName : orderedNames) {
             if (resName == null || resName.isEmpty()) continue;
-            int resId = context.getResources().getIdentifier(resName, "drawable", pkg);
-            if (resId != 0) {
-                return resId;
+            if (assetIconExists(context, resName)) {
+                return WidgetIconProvider.buildIconUri(resName);
             }
         }
-        return R.mipmap.ic_launcher;
+        return WidgetIconProvider.buildIconUri(fallbackClean.isEmpty() ? "art_1000015" : fallbackClean);
     }
 
-    public static int resolveFirstAvailableDrawableResId(
+    public static Uri resolveFirstAvailableIconUri(
         Context context,
         List<String> candidates,
         String fallbackFile
     ) {
-        return resolveUpgradeDrawableResId(context, "", "", "", candidates, fallbackFile);
+        return resolveUpgradeIconUri(context, "", "", "", candidates, fallbackFile);
     }
 
     private static int parseBuilderCapFromStatus(String status) {
@@ -569,8 +593,8 @@ public class VillageAppWidget extends AppWidgetProvider {
                 views.setTextViewText(R.id.widget_boost_status, "No active boosts");
                 views.setTextColor(R.id.widget_boost_status, Color.parseColor("#CBD5E1"));
                 views.setTextViewText(R.id.widget_last_synced, "UPDATED --:--");
-                int defaultThRes = resolveFirstAvailableDrawableResId(context, null, "art_town_hall_17.webp");
-                views.setImageViewResource(R.id.widget_th_icon, defaultThRes);
+                Uri defaultThUri = resolveFirstAvailableIconUri(context, null, "art_town_hall_17.webp");
+                views.setImageViewUri(R.id.widget_th_icon, defaultThUri);
                 appWidgetManager.updateAppWidget(appWidgetId, views);
                 return;
             }
@@ -599,7 +623,7 @@ public class VillageAppWidget extends AppWidgetProvider {
                 "⇄ " + (activeIdx + 1) + "/" + total
             );
 
-            // Bind 3D Town Hall icon via setImageViewResource (zero RemoteViews BitmapCache collision)
+            // Bind 3D Town Hall icon via setImageViewUri (zero duplicate drawables & zero BitmapCache collision)
             int thNum = village.optInt("thNumber", 17);
             String thIconFile = village.optString("thIcon", "");
             if (thIconFile.isEmpty()) {
@@ -609,8 +633,8 @@ public class VillageAppWidget extends AppWidgetProvider {
             thCandidates.add("art_town_hall_" + thNum);
             thCandidates.add(thIconFile);
             thCandidates.add("art_1000001");
-            int thResId = resolveFirstAvailableDrawableResId(context, thCandidates, "art_town_hall_17");
-            views.setImageViewResource(R.id.widget_th_icon, thResId);
+            Uri thUri = resolveFirstAvailableIconUri(context, thCandidates, "art_town_hall_17");
+            views.setImageViewUri(R.id.widget_th_icon, thUri);
 
             // Live Boost Status Pill
             String liveBoost = computeLiveBoostStatus(village, now);

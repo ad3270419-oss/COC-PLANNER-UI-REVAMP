@@ -2,9 +2,8 @@ package com.cocpotion.calculator;
 
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
-import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.net.Uri;
 import android.view.View;
 import android.widget.RemoteViews;
 import android.widget.RemoteViewsService;
@@ -220,7 +219,7 @@ public class VillageWidgetService extends RemoteViewsService {
                 defaultCategoryIcon = "art_1000068";
             }
 
-            int iconResId = VillageAppWidget.resolveUpgradeDrawableResId(
+            Uri iconUri = VillageAppWidget.resolveUpgradeIconUri(
                 context,
                 row.name,
                 row.rawId,
@@ -228,7 +227,7 @@ public class VillageWidgetService extends RemoteViewsService {
                 row.iconCandidates,
                 defaultCategoryIcon
             );
-            views.setImageViewResource(R.id.widget_item_icon, iconResId);
+            views.setImageViewUri(R.id.widget_item_icon, iconUri);
 
             Intent fillInIntent = new Intent();
             views.setOnClickFillInIntent(R.id.widget_item_card, fillInIntent);

@@ -81,6 +81,13 @@
             android:name=".VillageWidgetService"
             android:permission="android.permission.BIND_REMOTEVIEWS"
             android:exported="false" />
+
+        <!-- Read-only ContentProvider serving bundled assets/public/icons/*.webp to AppWidget RemoteViews -->
+        <provider
+            android:name=".WidgetIconProvider"
+            android:authorities="com.cocpotion.calculator.icons"
+            android:exported="true"
+            android:grantUriPermissions="true" />
     </application>
 
     <!-- Permissions -->
