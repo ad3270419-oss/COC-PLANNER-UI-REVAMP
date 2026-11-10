@@ -26,6 +26,7 @@ public class VillageWidgetService extends RemoteViewsService {
     private static class WidgetUpgradeRow {
         String sectionHeader;
         String name;
+        String rawId;
         String targetLvl;
         String finishPrimary;
         String finishSub;
@@ -64,7 +65,8 @@ public class VillageWidgetService extends RemoteViewsService {
                 if (village == null) return;
 
                 long now = System.currentTimeMillis();
-                String buildersHeader = village.optString("buildersSectionHeader", "BUILDERS");
+                String[] liveHeaders = VillageAppWidget.computeLiveBuilderHeaders(village, now);
+                String buildersHeader = liveHeaders[1];
                 JSONArray upgrades = village.optJSONArray("upgrades");
                 if (upgrades == null || upgrades.length() == 0) return;
 
@@ -129,6 +131,7 @@ public class VillageWidgetService extends RemoteViewsService {
             row.sectionHeader = sectionHeader;
             row.category = upg.optString("category", "builders");
             row.name = upg.optString("name", "Upgrade");
+            row.rawId = upg.optString("rawId", "");
             row.targetLvl = upg.optString("targetLvl", "");
 
             long targetTs = upg.optLong("targetTimestamp", 0L);
@@ -210,23 +213,22 @@ public class VillageWidgetService extends RemoteViewsService {
             views.setProgressBar(R.id.widget_item_progress, 100, row.progressPercent, false);
             views.setTextViewText(R.id.widget_item_finish_sub, row.finishSub);
 
-            String defaultCategoryIcon = "art_1000015.webp";
+            String defaultCategoryIcon = "art_1000015";
             if ("laboratory".equalsIgnoreCase(row.category)) {
-                defaultCategoryIcon = "art_1000007.webp";
+                defaultCategoryIcon = "art_1000007";
             } else if ("pethouse".equalsIgnoreCase(row.category)) {
-                defaultCategoryIcon = "art_1000068.webp";
+                defaultCategoryIcon = "art_1000068";
             }
 
-            Bitmap iconBmp = VillageAppWidget.loadFirstAvailableAssetBitmap(
+            int iconResId = VillageAppWidget.resolveUpgradeDrawableResId(
                 context,
+                row.name,
+                row.rawId,
+                row.targetLvl,
                 row.iconCandidates,
                 defaultCategoryIcon
             );
-            if (iconBmp != null) {
-                views.setImageViewBitmap(R.id.widget_item_icon, iconBmp);
-            } else {
-                views.setImageViewResource(R.id.widget_item_icon, R.mipmap.ic_launcher);
-            }
+            views.setImageViewResource(R.id.widget_item_icon, iconResId);
 
             Intent fillInIntent = new Intent();
             views.setOnClickFillInIntent(R.id.widget_item_card, fillInIntent);
@@ -246,12 +248,17 @@ public class VillageWidgetService extends RemoteViewsService {
 
         @Override
         public long getItemId(int position) {
-            return position;
+            if (position < 0 || position >= rows.size()) {
+                return position;
+            }
+            WidgetUpgradeRow r = rows.get(position);
+            String key = r.name + "|" + r.targetLvl + "|" + r.finishPrimary;
+            return ((long) position << 32) | (key.hashCode() & 0xFFFFFFFFL);
         }
 
         @Override
         public boolean hasStableIds() {
-            return true;
+            return false;
         }
     }
 }

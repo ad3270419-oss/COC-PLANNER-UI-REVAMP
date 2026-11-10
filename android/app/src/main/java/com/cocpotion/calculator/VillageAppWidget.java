@@ -8,18 +8,20 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.widget.RemoteViews;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -179,64 +181,253 @@ public class VillageAppWidget extends AppWidgetProvider {
         }
     }
 
-    public static Bitmap loadFirstAvailableAssetBitmap(
+    private static Map<String, String> cachedArtByNameLower = null;
+
+    private static synchronized Map<String, String> getArtByNameLowerMap(Context context) {
+        if (cachedArtByNameLower != null && !cachedArtByNameLower.isEmpty()) {
+            return cachedArtByNameLower;
+        }
+        Map<String, String> map = new HashMap<>();
+        AssetManager assetManager = context.getAssets();
+        String[] indexPaths = new String[] {
+            "public/icons/art_index.json",
+            "icons/art_index.json"
+        };
+        for (String path : indexPaths) {
+            InputStream is = null;
+            try {
+                is = assetManager.open(path);
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int read;
+                while ((read = is.read(buf)) != -1) {
+                    bos.write(buf, 0, read);
+                }
+                String jsonStr = bos.toString("UTF-8");
+                JSONObject obj = new JSONObject(jsonStr);
+                Iterator<String> keys = obj.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    String val = obj.optString(k, "").trim();
+                    if (!k.trim().isEmpty() && !val.isEmpty()) {
+                        map.put(k.trim().toLowerCase(Locale.US), val);
+                    }
+                }
+                if (!map.isEmpty()) {
+                    cachedArtByNameLower = map;
+                    return map;
+                }
+            } catch (Exception ignored) {
+                // Try next path
+            } finally {
+                if (is != null) {
+                    try {
+                        is.close();
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        cachedArtByNameLower = map;
+        return map;
+    }
+
+    public static String cleanDrawableEntryName(String rawPath) {
+        if (rawPath == null) return "";
+        String clean = rawPath.trim();
+        if (clean.startsWith("/")) {
+            clean = clean.substring(1);
+        }
+        if (clean.startsWith("public/")) {
+            clean = clean.substring("public/".length());
+        }
+        if (clean.startsWith("icons/")) {
+            clean = clean.substring("icons/".length());
+        }
+        int dotIdx = clean.lastIndexOf('.');
+        if (dotIdx > 0) {
+            clean = clean.substring(0, dotIdx);
+        }
+        return clean.trim().toLowerCase(Locale.US);
+    }
+
+    public static String stripUpgradeDisplaySuffix(String displayTitle) {
+        if (displayTitle == null) return "";
+        String t = displayTitle.trim();
+        String[] suffixes = new String[] {
+            " · G-LAB",
+            " · LAB",
+            " · PET",
+            " · G"
+        };
+        for (String s : suffixes) {
+            if (t.endsWith(s)) {
+                t = t.substring(0, t.length() - s.length()).trim();
+                break;
+            }
+        }
+        return t;
+    }
+
+    public static int resolveUpgradeDrawableResId(
         Context context,
+        String displayTitle,
+        String rawId,
+         String targetLvlText,
         List<String> candidates,
         String fallbackFile
     ) {
-        List<String> allPaths = new ArrayList<>();
+        List<String> orderedNames = new ArrayList<>();
+
+        String baseTitle = stripUpgradeDisplaySuffix(displayTitle);
+        String lowerTitle = baseTitle.toLowerCase(Locale.US);
+
+        if ("town hall".equals(lowerTitle) || "1000001".equals(rawId != null ? rawId.trim() : "")) {
+            int parsedTargetTh = -1;
+            if (targetLvlText != null) {
+                String digits = targetLvlText.replaceAll("[^0-9]", "");
+                if (!digits.isEmpty()) {
+                    try {
+                        parsedTargetTh = Integer.parseInt(digits);
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+            if (parsedTargetTh >= 1 && parsedTargetTh <= 18 && "town hall".equals(lowerTitle)) {
+                orderedNames.add("art_town_hall_" + parsedTargetTh);
+            }
+        }
+
+        // 1. Exact title lookup in art_index.json so the icon is 100% locked to the displayed title
+        if (!lowerTitle.isEmpty() && !"town hall".equals(lowerTitle)) {
+            Map<String, String> artMap = getArtByNameLowerMap(context);
+            String mappedArt = artMap.get(lowerTitle);
+            if (mappedArt != null && !mappedArt.isEmpty()) {
+                orderedNames.add(cleanDrawableEntryName(mappedArt));
+            }
+        }
+
+        // 2. Direct rawId lookup (when not mislabeled as Town Hall)
+        if (rawId != null && !rawId.trim().isEmpty()) {
+            String cleanId = rawId.trim();
+            if (!"1000001".equals(cleanId) || "town hall".equals(lowerTitle)) {
+                orderedNames.add("art_" + cleanId);
+            }
+        }
+
+        // 3. Explicit iconCandidates list from JS payload
         if (candidates != null) {
-            allPaths.addAll(candidates);
-        }
-        if (fallbackFile != null && !fallbackFile.isEmpty()) {
-            allPaths.add(fallbackFile);
-        }
-        AssetManager assetManager = context.getAssets();
-        for (String rawPath : allPaths) {
-            if (rawPath == null || rawPath.trim().isEmpty()) continue;
-            String cleanName = rawPath.trim();
-            if (cleanName.startsWith("/")) {
-                cleanName = cleanName.substring(1);
-            }
-            if (cleanName.startsWith("public/")) {
-                cleanName = cleanName.substring("public/".length());
-            }
-            if (cleanName.startsWith("icons/")) {
-                cleanName = cleanName.substring("icons/".length());
-            }
-            String[] tryAssetPaths = new String[] {
-                "public/icons/" + cleanName,
-                "icons/" + cleanName
-            };
-            for (String assetPath : tryAssetPaths) {
-                InputStream is = null;
-                try {
-                    is = assetManager.open(assetPath);
-                    Bitmap decoded = BitmapFactory.decodeStream(is);
-                    if (decoded != null) {
-                        int maxDim = 112;
-                        int w = decoded.getWidth();
-                        int h = decoded.getHeight();
-                        if (w > maxDim || h > maxDim) {
-                            float ratio = Math.min((float) maxDim / w, (float) maxDim / h);
-                            int nw = Math.max(1, Math.round(w * ratio));
-                            int nh = Math.max(1, Math.round(h * ratio));
-                            return Bitmap.createScaledBitmap(decoded, nw, nh, true);
-                        }
-                        return decoded;
+            for (String cand : candidates) {
+                String cName = cleanDrawableEntryName(cand);
+                if (!cName.isEmpty()) {
+                    // Never allow a Town Hall icon candidate on a non-Town Hall upgrade row
+                    if (cName.startsWith("art_town_hall_") && !"town hall".equals(lowerTitle) && !lowerTitle.isEmpty()) {
+                        continue;
                     }
-                } catch (Exception ignored) {
-                    // Try next candidate
-                } finally {
-                    if (is != null) {
-                        try {
-                            is.close();
-                        } catch (Exception ignored) {}
+                    if (!orderedNames.contains(cName)) {
+                        orderedNames.add(cName);
                     }
                 }
             }
         }
-        return null;
+
+        // 4. Category fallback
+        if (fallbackFile != null && !fallbackFile.isEmpty()) {
+            String fb = cleanDrawableEntryName(fallbackFile);
+            if (!fb.isEmpty() && !orderedNames.contains(fb)) {
+                orderedNames.add(fb);
+            }
+        }
+
+        String pkg = context.getPackageName();
+        for (String resName : orderedNames) {
+            if (resName == null || resName.isEmpty()) continue;
+            int resId = context.getResources().getIdentifier(resName, "drawable", pkg);
+            if (resId != 0) {
+                return resId;
+            }
+        }
+        return R.mipmap.ic_launcher;
+    }
+
+    public static int resolveFirstAvailableDrawableResId(
+        Context context,
+        List<String> candidates,
+        String fallbackFile
+    ) {
+        return resolveUpgradeDrawableResId(context, "", "", "", candidates, fallbackFile);
+    }
+
+    private static int parseBuilderCapFromStatus(String status) {
+        if (status == null) return 6;
+        int slashIdx = status.indexOf('/');
+        if (slashIdx >= 0 && slashIdx + 1 < status.length()) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = slashIdx + 1; i < status.length(); i++) {
+                char ch = status.charAt(i);
+                if (Character.isDigit(ch)) {
+                    sb.append(ch);
+                } else if (sb.length() > 0) {
+                    break;
+                }
+            }
+            if (sb.length() > 0) {
+                try {
+                    int val = Integer.parseInt(sb.toString());
+                    if (val >= 1 && val <= 6) return val;
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        return 6;
+    }
+
+    public static String[] computeLiveBuilderHeaders(JSONObject village, long now) {
+        int thNum = village.optInt("thNumber", 17);
+        String savedSub = village.optString("headerSubtitle", "");
+        String savedSec = village.optString("buildersSectionHeader", "BUILDERS");
+        String bStat = village.optString("buildersStatus", "0/6 BUILDERS");
+        int regularCap = parseBuilderCapFromStatus(bStat.isEmpty() ? savedSub : bStat);
+
+        JSONArray upgrades = village.optJSONArray("upgrades");
+        if (upgrades == null) {
+            String sub = savedSub.isEmpty() ? ("TH " + thNum + " · " + bStat) : savedSub;
+            return new String[] { sub, savedSec };
+        }
+
+        int busyRegular = 0;
+        boolean goblinBusy = false;
+        boolean sawTimestampedUpgrade = false;
+
+        for (int i = 0; i < upgrades.length(); i++) {
+            JSONObject upg = upgrades.optJSONObject(i);
+            if (upg == null) continue;
+            String cat = upg.optString("category", "builders");
+            if ("laboratory".equalsIgnoreCase(cat) || "pethouse".equalsIgnoreCase(cat)) {
+                continue;
+            }
+            long targetTs = upg.optLong("targetTimestamp", 0L);
+            if (targetTs > 0L) {
+                sawTimestampedUpgrade = true;
+                if (targetTs <= now) {
+                    continue;
+                }
+            }
+            String badge = upg.optString("slotBadge", "");
+            String name = upg.optString("name", "");
+            if ("[GOBLIN]".equalsIgnoreCase(badge) || name.endsWith(" · G")) {
+                goblinBusy = true;
+            } else {
+                busyRegular++;
+            }
+        }
+
+        if (!sawTimestampedUpgrade && !savedSub.isEmpty()) {
+            return new String[] { savedSub, savedSec };
+        }
+
+        String liveSub =
+            "TH " + thNum + " · " + busyRegular + "/" + regularCap + " BUILDERS" + (goblinBusy ? " + G" : "");
+        String liveSec =
+            "BUILDERS  " + busyRegular + "/" + regularCap + (goblinBusy ? " + Goblin" : "");
+        return new String[] { liveSub, liveSec };
     }
 
     private static String computeLiveBoostStatus(JSONObject village, long now) {
@@ -378,10 +569,8 @@ public class VillageAppWidget extends AppWidgetProvider {
                 views.setTextViewText(R.id.widget_boost_status, "No active boosts");
                 views.setTextColor(R.id.widget_boost_status, Color.parseColor("#CBD5E1"));
                 views.setTextViewText(R.id.widget_last_synced, "UPDATED --:--");
-                Bitmap defaultTh = loadFirstAvailableAssetBitmap(context, null, "art_town_hall_17.webp");
-                if (defaultTh != null) {
-                    views.setImageViewBitmap(R.id.widget_th_icon, defaultTh);
-                }
+                int defaultThRes = resolveFirstAvailableDrawableResId(context, null, "art_town_hall_17.webp");
+                views.setImageViewResource(R.id.widget_th_icon, defaultThRes);
                 appWidgetManager.updateAppWidget(appWidgetId, views);
                 return;
             }
@@ -400,14 +589,9 @@ public class VillageAppWidget extends AppWidgetProvider {
             }
             views.setTextViewText(R.id.widget_village_name, villageName);
 
-            // Subtitle: "TH 17 · 6/6 BUILDERS + G"
-            String headerSubtitle = village.optString("headerSubtitle", "");
-            if (headerSubtitle.isEmpty()) {
-                int thNum = village.optInt("thNumber", 17);
-                String bStat = village.optString("buildersStatus", "0/6 BUILDERS");
-                headerSubtitle = "TH " + thNum + " · " + bStat;
-            }
-            views.setTextViewText(R.id.widget_builders_status, headerSubtitle);
+            // Live Subtitle: "TH 17 · 4/6 BUILDERS + G"
+            String[] liveHeaders = computeLiveBuilderHeaders(village, now);
+            views.setTextViewText(R.id.widget_builders_status, liveHeaders[0]);
 
             // Switch button shows account index (e.g. "⇄ 1/4")
             views.setTextViewText(
@@ -415,21 +599,18 @@ public class VillageAppWidget extends AppWidgetProvider {
                 "⇄ " + (activeIdx + 1) + "/" + total
             );
 
-            // Load 3D Town Hall icon from bundled assets
+            // Bind 3D Town Hall icon via setImageViewResource (zero RemoteViews BitmapCache collision)
+            int thNum = village.optInt("thNumber", 17);
             String thIconFile = village.optString("thIcon", "");
             if (thIconFile.isEmpty()) {
-                int thNum = village.optInt("thNumber", 17);
                 thIconFile = "art_town_hall_" + thNum + ".webp";
             }
             List<String> thCandidates = new ArrayList<>();
+            thCandidates.add("art_town_hall_" + thNum);
             thCandidates.add(thIconFile);
-            thCandidates.add("art_1000001.webp");
-            Bitmap thBmp = loadFirstAvailableAssetBitmap(context, thCandidates, "art_town_hall_17.webp");
-            if (thBmp != null) {
-                views.setImageViewBitmap(R.id.widget_th_icon, thBmp);
-            } else {
-                views.setImageViewResource(R.id.widget_th_icon, R.mipmap.ic_launcher);
-            }
+            thCandidates.add("art_1000001");
+            int thResId = resolveFirstAvailableDrawableResId(context, thCandidates, "art_town_hall_17");
+            views.setImageViewResource(R.id.widget_th_icon, thResId);
 
             // Live Boost Status Pill
             String liveBoost = computeLiveBoostStatus(village, now);

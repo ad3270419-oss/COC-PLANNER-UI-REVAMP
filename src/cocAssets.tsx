@@ -39,8 +39,13 @@ export function resolveUpgradeIconSources(params: {
   const cleanedTitle = upgradeTitle ? upgradeTitle.trim() : '';
   const lowerTitle = cleanedTitle.toLowerCase();
 
+  const isKnownNonTownHallTitle =
+    cleanedTitle.length > 0 &&
+    lowerTitle !== 'town hall' &&
+    Boolean(ART_FILE_BY_NAME[cleanedTitle] || LOWERCASE_NAME_TO_ART[lowerTitle]);
+
   // Special handling if the item is Town Hall (1000001)
-  if (cleanedId === '1000001' || lowerTitle === 'town hall') {
+  if (!isKnownNonTownHallTitle && (cleanedId === '1000001' || lowerTitle === 'town hall')) {
     if (typeof targetLevel === 'number' && targetLevel >= 1 && targetLevel <= 18) {
       const exactTh = Math.min(18, Math.max(1, Math.floor(targetLevel)));
       candidates.push(`/icons/art_town_hall_${exactTh}.webp`);
@@ -52,26 +57,26 @@ export function resolveUpgradeIconSources(params: {
     candidates.push('/icons/art_1000001.webp');
   }
 
-  // 1. Direct ID match: /icons/art_${data_id}.webp
-  if (cleanedId) {
+  // 1. Direct name match in art_index.json (guarantees icon always matches displayed title)
+  if (cleanedTitle && lowerTitle !== 'town hall') {
+    const exactArt = ART_FILE_BY_NAME[cleanedTitle] || LOWERCASE_NAME_TO_ART[lowerTitle];
+    if (exactArt) {
+      candidates.push(`/icons/${exactArt}.webp`);
+    }
+  }
+
+  // 2. Direct ID match: /icons/art_${data_id}.webp
+  if (cleanedId && (!isKnownNonTownHallTitle || cleanedId !== '1000001')) {
     candidates.push(`/icons/art_${cleanedId}.webp`);
   }
 
-  // 2. Match via item_names.json -> art_index.json
+  // 3. Match via item_names.json -> art_index.json
   if (cleanedId && ITEM_NAMES_BY_ID[cleanedId]) {
     const mappedName = ITEM_NAMES_BY_ID[cleanedId];
     const artByMappedName =
       ART_FILE_BY_NAME[mappedName] || LOWERCASE_NAME_TO_ART[mappedName.toLowerCase()];
     if (artByMappedName) {
       candidates.push(`/icons/${artByMappedName}.webp`);
-    }
-  }
-
-  // 3. Direct name match in art_index.json
-  if (cleanedTitle) {
-    const exactArt = ART_FILE_BY_NAME[cleanedTitle] || LOWERCASE_NAME_TO_ART[lowerTitle];
-    if (exactArt) {
-      candidates.push(`/icons/${exactArt}.webp`);
     }
   }
 
