@@ -236,6 +236,9 @@ interface SavedState {
   builderBoostEndTime?: number | null;
   labBoostEndTime?: number | null;
   petBoostEndTime?: number | null;
+  // Active In-Game Magic Snack Boost End Timestamps (ms)
+  builderBiteEndTime?: number | null;
+  studySoupEndTime?: number | null;
   // Helpers / Apprentices State (93000000 & 93000001)
   builderApprentice?: BuilderApprenticeState;
   labApprentice?: LabApprenticeState;
@@ -287,6 +290,8 @@ interface RawCoCBoosts {
   builder_boost?: number;
   lab_boost?: number;
   pet_boost?: number;
+  builder_consumable?: number;
+  lab_consumable?: number;
   [key: string]: unknown;
 }
 
@@ -1698,6 +1703,8 @@ function createDefaultSavedState(): SavedState {
     builderBoostEndTime: null,
     labBoostEndTime: null,
     petBoostEndTime: null,
+    builderBiteEndTime: null,
+    studySoupEndTime: null,
     builderApprentice: createDefaultBuilderApprentice(),
     labApprentice: createDefaultLabApprentice(),
   };
@@ -1856,6 +1863,14 @@ function normalizeSavedState(
     petBoostEndTime:
       typeof parsed.petBoostEndTime === 'number' && parsed.petBoostEndTime > 0
         ? parsed.petBoostEndTime
+        : null,
+    builderBiteEndTime:
+      typeof parsed.builderBiteEndTime === 'number' && parsed.builderBiteEndTime > 0
+        ? parsed.builderBiteEndTime
+        : null,
+    studySoupEndTime:
+      typeof parsed.studySoupEndTime === 'number' && parsed.studySoupEndTime > 0
+        ? parsed.studySoupEndTime
         : null,
     builderApprentice: {
       id: 93000000,
@@ -2226,20 +2241,62 @@ export function getHelperBoostIntervalsFromNow(
 }
 
 /**
+ * Resolves the combined base + potion + snack rate at a given time slice, strictly enforcing
+ * Clash of Clans Magic Snack stacking rules:
+ * - BUILDER BITE (2x): Does NOT stack with Builder Potion (10x).
+ *   * If Builder Potion (10x) is active, Builder Potion overrides Bite -> 10x.
+ *   * If NO Builder Potion is active and Bite is active -> 2x.
+ * - STUDY SOUP (4x for Lab/Pets): DOES stack additively with Research/Pet Potion (24x).
+ *   * If Research/Pet Potion (24x) is active alongside Study Soup (4x) -> 27x (Base 1x + 23x + 3x).
+ *   * If NO Research/Pet Potion is active and Study Soup is active -> 4x.
+ */
+export function resolveBasePotionSnackRate(params: {
+  potionActive: boolean;
+  potionRate: number;
+  snackActive: boolean;
+  snackType?: 'builder_bite' | 'study_soup';
+}): number {
+  const { potionActive, potionRate, snackActive, snackType } = params;
+  const isBuilder = snackType === 'builder_bite' || (snackType !== 'study_soup' && potionRate === 10);
+
+  if (isBuilder) {
+    if (potionActive && potionRate > 1) return potionRate; // 10x overrides 2x Bite
+    if (snackActive) return 2; // 2x Builder Bite when no Builder Potion is active
+    return 1;
+  }
+
+  // Lab & Pets: Study Soup (4x = +3x bonus) stacks additively with Research/Pet Potion (24x = +23x bonus) -> 27x
+  if (potionActive && potionRate > 1 && snackActive) {
+    return potionRate + 3; // 24 + 3 = 27x
+  }
+  if (potionActive && potionRate > 1) {
+    return potionRate; // 24x
+  }
+  if (snackActive) {
+    return 4; // 4x Study Soup
+  }
+  return 1;
+}
+
+/**
  * Builds combined real-time segments where:
  * - Primary Builder / Lab always works at 1x base speed.
+ * - Potion & Magic Snack apply according to `resolveBasePotionSnackRate` (Builder Bite 2x non-stacking; Study Soup 4x additive -> 27x).
  * - A Level `L` Helper works at `Lx` bonus speed for 1 hour (saving `L` hours in 1 real hour),
- *   so total progress rate during the 1-hour helper window is `1 + L` (or `potionRate + L` if a potion is also active).
+ *   so total progress rate during the 1-hour helper window is `basePotionSnackRate + L`.
  */
 function buildCombinedBoostSegments(
   potionBoostSecs: number,
   potionRate: number,
   helperIntervals: Array<{ startSec: number; endSec: number }>,
   helperBonusMultiplier: number,
-  maxTimeSec: number
+  maxTimeSec: number,
+  snackBoostSecs = 0,
+  snackType?: 'builder_bite' | 'study_soup'
 ): Array<{ startSec: number; endSec: number; rate: number }> {
   if (maxTimeSec <= 0) return [];
   const pSec = potionBoostSecs > 0 && potionRate > 1 ? Math.min(maxTimeSec, potionBoostSecs) : 0;
+  const sSec = snackBoostSecs > 0 ? Math.min(maxTimeSec, snackBoostSecs) : 0;
   const validHelper =
     helperBonusMultiplier >= 1
       ? helperIntervals
@@ -2252,6 +2309,7 @@ function buildCombinedBoostSegments(
 
   const pointSet = new Set<number>([0, maxTimeSec]);
   if (pSec > 0) pointSet.add(pSec);
+  if (sSec > 0) pointSet.add(sSec);
   for (const iv of validHelper) {
     pointSet.add(iv.startSec);
     pointSet.add(iv.endSec);
@@ -2265,15 +2323,15 @@ function buildCombinedBoostSegments(
     if (endSec <= startSec) continue;
     const mid = (startSec + endSec) / 2;
     const pActive = mid < pSec;
+    const sActive = mid < sSec;
     const hActive = validHelper.some((iv) => mid >= iv.startSec && mid <= iv.endSec);
-    const rate =
-      pActive && hActive
-        ? potionRate + helperBonusMultiplier
-        : pActive
-        ? potionRate
-        : hActive
-        ? 1 + helperBonusMultiplier
-        : 1;
+    const baseRate = resolveBasePotionSnackRate({
+      potionActive: pActive,
+      potionRate,
+      snackActive: sActive,
+      snackType,
+    });
+    const rate = baseRate + (hActive ? helperBonusMultiplier : 0);
     segments.push({ startSec, endSec, rate });
   }
   return segments;
@@ -2296,6 +2354,8 @@ export function calcHelperSessionRealTimeSeconds(params: {
   potionCount?: number;
   activePotionBoostSeconds?: number;
   potionRate?: 10 | 24;
+  activeSnackBoostSeconds?: number;
+  snackType?: 'builder_bite' | 'study_soup';
   now?: number;
 }): number {
   const {
@@ -2307,6 +2367,8 @@ export function calcHelperSessionRealTimeSeconds(params: {
     potionCount = 0,
     activePotionBoostSeconds = 0,
     potionRate = 10,
+    activeSnackBoostSeconds = 0,
+    snackType,
     now = Date.now(),
   } = params;
 
@@ -2314,6 +2376,7 @@ export function calcHelperSessionRealTimeSeconds(params: {
 
   const totalPotionRealSecs =
     Math.max(0, activePotionBoostSeconds) + Math.max(0, potionCount) * 3600;
+  const totalSnackRealSecs = Math.max(0, activeSnackBoostSeconds);
   const H = getHelperSpeedMultiplier(helper?.level ?? helperLevel);
 
   const horizonSec = Math.max(remainingUpgradeSeconds + 86400, 45 * 86400);
@@ -2324,8 +2387,8 @@ export function calcHelperSessionRealTimeSeconds(params: {
       ? [{ startSec: 0, endSec: Math.max(0, activeSessionSeconds) }]
       : [];
 
-  // Pure potion boost (or unboosted) when no helper intervals apply to this slot
-  if (helperIntervals.length === 0 || H < 1) {
+  // Pure potion boost (or unboosted) when no helper intervals and no snack boost apply to this slot
+  if ((helperIntervals.length === 0 || H < 1) && totalSnackRealSecs <= 0) {
     return potionRate === 24
       ? calc24xRealTimeSeconds(remainingUpgradeSeconds, potionCount, activePotionBoostSeconds)
       : calc10xRealTimeSeconds(remainingUpgradeSeconds, potionCount, activePotionBoostSeconds);
@@ -2336,7 +2399,9 @@ export function calcHelperSessionRealTimeSeconds(params: {
     potionRate,
     helperIntervals,
     H,
-    horizonSec
+    horizonSec,
+    totalSnackRealSecs,
+    snackType || (potionRate === 24 ? 'study_soup' : 'builder_bite')
   );
 
   let remWork = remainingUpgradeSeconds;
@@ -2499,6 +2564,12 @@ function syncAllVillagesToNativeWidget(
       }
       if (d.petBoostEndTime && d.petBoostEndTime > now) {
         activeBoostParts.push('Pet 24x Active');
+      }
+      if (d.builderBiteEndTime && d.builderBiteEndTime > now) {
+        activeBoostParts.push('Bite 2x');
+      }
+      if (d.studySoupEndTime && d.studySoupEndTime > now) {
+        activeBoostParts.push('Soup 4x');
       }
       const bHelperCycle = getHelperCycleStateAt(d.builderApprentice, now);
       const lHelperCycle = getHelperCycleStateAt(d.labApprentice, now);
@@ -2790,7 +2861,9 @@ function computeTimeParts(
         recurrent?: boolean;
       }
     | null,
-  isHelperAssignedToSlot = false
+  isHelperAssignedToSlot = false,
+  snackBoostEndTime?: number | null,
+  snackType?: 'builder_bite' | 'study_soup'
 ) {
   const remMs = targetTimestamp - now;
   if (remMs <= 0) {
@@ -2802,6 +2875,10 @@ function computeTimeParts(
     potionBoostEndTime && potionBoostEndTime > now && potionSpeedMultiplier > 1
       ? (potionBoostEndTime - now) / 1000
       : 0;
+  const sRemSec =
+    snackBoostEndTime && snackBoostEndTime > now
+      ? (snackBoostEndTime - now) / 1000
+      : 0;
 
   const H = helper ? getHelperSpeedMultiplier(helper.level) : helperSpeedMultiplier;
   const helperIntervals =
@@ -2811,7 +2888,7 @@ function computeTimeParts(
       ? [{ startSec: 0, endSec: (helperBoostEndTime - now) / 1000 }]
       : [];
 
-  if (pRemSec <= 0 && helperIntervals.length === 0) {
+  if (pRemSec <= 0 && sRemSec <= 0 && helperIntervals.length === 0) {
     return formatTotalSecondsToParts(totalRealRemSec);
   }
 
@@ -2820,7 +2897,9 @@ function computeTimeParts(
     potionSpeedMultiplier,
     helperIntervals,
     H,
-    totalRealRemSec
+    totalRealRemSec,
+    sRemSec,
+    snackType || (potionSpeedMultiplier === 24 ? 'study_soup' : 'builder_bite')
   );
 
   let totalUpgradeSeconds = 0;
@@ -2890,6 +2969,8 @@ const LiveHudTicker: React.FC<{
   helperIcon?: string;
   potionBoostEndTime?: number | null;
   potionSpeedMultiplier?: number;
+  snackBoostEndTime?: number | null;
+  snackType?: 'builder_bite' | 'study_soup';
   label?: string;
   finishBadgeText?: string;
   accentColorClass?: string;
@@ -2904,6 +2985,8 @@ const LiveHudTicker: React.FC<{
     helperIcon = '🔬',
     potionBoostEndTime = null,
     potionSpeedMultiplier = 1,
+    snackBoostEndTime = null,
+    snackType,
     label = 'Live Countdown',
     finishBadgeText = '⚡ UPGRADE FINISHED! BUILDER FREE',
     accentColorClass = 'text-[#fbbf24]',
@@ -2912,6 +2995,14 @@ const LiveHudTicker: React.FC<{
     const computeBadgeAt = (now: number): { text: string | null; isHelperResting: boolean } => {
       const pActive =
         !!potionBoostEndTime && potionBoostEndTime > now && potionSpeedMultiplier > 1;
+      const sActive = !!snackBoostEndTime && snackBoostEndTime > now;
+      const basePotionSnackRate = resolveBasePotionSnackRate({
+        potionActive: pActive,
+        potionRate: potionSpeedMultiplier,
+        snackActive: sActive,
+        snackType,
+      });
+      const hasBaseBoost = basePotionSnackRate > 1;
       const hRate = helper ? getHelperSpeedMultiplier(helper.level) : helperSpeedMultiplier;
       const cycle =
         helper && isHelperAssignedToSlot ? getHelperCycleStateAt(helper, now) : null;
@@ -2920,16 +3011,16 @@ const LiveHudTicker: React.FC<{
           ? cycle.isWorkingNow && hRate >= 1
           : !!helperBoostEndTime && helperBoostEndTime > now && hRate >= 1;
 
-      if (pActive && hWorking) {
-        const combined = potionSpeedMultiplier + hRate;
+      if (hasBaseBoost && hWorking) {
+        const combined = basePotionSnackRate + hRate;
         return {
-          text: `⚡ ${combined}x Boost Running (${potionSpeedMultiplier}x + ${hRate}x)`,
+          text: `⚡ ${combined}x Boost Running (${basePotionSnackRate}x + ${hRate}x)`,
           isHelperResting: false,
         };
       }
-      if (pActive) {
+      if (hasBaseBoost) {
         return {
-          text: `⚡ ${potionSpeedMultiplier}x Boost Running`,
+          text: `⚡ ${basePotionSnackRate}x Boost Running`,
           isHelperResting: false,
         };
       }
@@ -2960,7 +3051,9 @@ const LiveHudTicker: React.FC<{
       potionSpeedMultiplier,
       Date.now(),
       helper,
-      isHelperAssignedToSlot
+      isHelperAssignedToSlot,
+      snackBoostEndTime,
+      snackType
     );
     const [isFinished, setIsFinished] = useState<boolean>(initialParts.isFinished);
     const [badgeState, setBadgeState] = useState<{
@@ -2992,7 +3085,9 @@ const LiveHudTicker: React.FC<{
           potionSpeedMultiplier,
           now,
           helper,
-          isHelperAssignedToSlot
+          isHelperAssignedToSlot,
+          snackBoostEndTime,
+          snackType
         );
 
         const nextBadge = computeBadgeAt(now);
@@ -3069,6 +3164,8 @@ const LiveHudTicker: React.FC<{
       helperIcon,
       potionBoostEndTime,
       potionSpeedMultiplier,
+      snackBoostEndTime,
+      snackType,
     ]);
 
     if (isFinished) {
@@ -3722,6 +3819,8 @@ const LedgerUpgradeQueueCard: React.FC<{
   helperSpeedMultiplier?: number;
   potionBoostEndTime?: number | null;
   potionSpeedMultiplier?: number;
+  snackBoostEndTime?: number | null;
+  snackType?: 'builder_bite' | 'study_soup';
   onActionClick?: () => void;
   onFinish?: () => void;
 }> = React.memo(
@@ -3742,18 +3841,28 @@ const LedgerUpgradeQueueCard: React.FC<{
     helperSpeedMultiplier = 1,
     potionBoostEndTime = null,
     potionSpeedMultiplier = 1,
+    snackBoostEndTime = null,
+    snackType,
     onActionClick,
     onFinish,
   }) => {
     const [showDetailedTicker, setShowDetailedTicker] = useState(false);
 
     const computeCardState = (now: number) => {
-      // `targetTimestamp` already incorporates all active & previewed Potion and Helper boost deductions
+      // `targetTimestamp` already incorporates all active & previewed Potion, Snack, and Helper boost deductions
       const realRemSec = Math.max(0, Math.ceil((targetTimestamp - now) / 1000));
       const parts = formatTotalSecondsToParts(realRemSec);
 
       const pActive =
         !!potionBoostEndTime && potionBoostEndTime > now && potionSpeedMultiplier > 1;
+      const sActive = !!snackBoostEndTime && snackBoostEndTime > now;
+      const basePotionSnackRate = resolveBasePotionSnackRate({
+        potionActive: pActive,
+        potionRate: potionSpeedMultiplier,
+        snackActive: sActive,
+        snackType,
+      });
+      const hasBaseBoost = basePotionSnackRate > 1;
       const hRate = helper ? getHelperSpeedMultiplier(helper.level) : helperSpeedMultiplier;
       const cycle =
         helper && isHelperAssignedToSlot ? getHelperCycleStateAt(helper, now) : null;
@@ -3763,10 +3872,10 @@ const LedgerUpgradeQueueCard: React.FC<{
           : !!helperBoostEndTime && helperBoostEndTime > now && hRate >= 1;
 
       let boostBadge: string | null = null;
-      if (pActive && hWorking) {
-        boostBadge = `⚡ ${potionSpeedMultiplier + hRate}x`;
-      } else if (pActive) {
-        boostBadge = `⚡ ${potionSpeedMultiplier}x`;
+      if (hasBaseBoost && hWorking) {
+        boostBadge = `⚡ ${basePotionSnackRate + hRate}x`;
+      } else if (hasBaseBoost) {
+        boostBadge = `⚡ ${basePotionSnackRate}x`;
       } else if (hWorking) {
         boostBadge = `${helperIcon} ${hRate}x Active`;
       }
@@ -3826,6 +3935,8 @@ const LedgerUpgradeQueueCard: React.FC<{
       isHelperAssignedToSlot,
       potionBoostEndTime,
       potionSpeedMultiplier,
+      snackBoostEndTime,
+      snackType,
     ]);
 
     const barColorClass = isGoblin
@@ -3955,6 +4066,8 @@ const LedgerUpgradeQueueCard: React.FC<{
               helperSpeedMultiplier={helperSpeedMultiplier}
               potionBoostEndTime={potionBoostEndTime}
               potionSpeedMultiplier={potionSpeedMultiplier}
+              snackBoostEndTime={snackBoostEndTime}
+              snackType={snackType}
               accentColorClass={
                 isGoblin
                   ? 'text-[#4ADE80]'
@@ -4105,7 +4218,7 @@ export default function App() {
   );
   const [petSavedText, setPetSavedText] = useState<string>(initial.petSavedText || '');
 
-  // Active In-Game Potion Boost End Timestamps (per account)
+  // Active In-Game Potion & Magic Snack Boost End Timestamps (per account)
   const [builderBoostEndTime, setBuilderBoostEndTime] = useState<number | null>(
     initial.builderBoostEndTime && initial.builderBoostEndTime > Date.now()
       ? initial.builderBoostEndTime
@@ -4119,6 +4232,16 @@ export default function App() {
   const [petBoostEndTime, setPetBoostEndTime] = useState<number | null>(
     initial.petBoostEndTime && initial.petBoostEndTime > Date.now()
       ? initial.petBoostEndTime
+      : null
+  );
+  const [builderBiteEndTime, setBuilderBiteEndTime] = useState<number | null>(
+    initial.builderBiteEndTime && initial.builderBiteEndTime > Date.now()
+      ? initial.builderBiteEndTime
+      : null
+  );
+  const [studySoupEndTime, setStudySoupEndTime] = useState<number | null>(
+    initial.studySoupEndTime && initial.studySoupEndTime > Date.now()
+      ? initial.studySoupEndTime
       : null
   );
 
@@ -4406,10 +4529,12 @@ export default function App() {
         setNowTick(now);
       }
 
-      // 3. Transition expired potion boosts only when an expiration actually occurs
+      // 3. Transition expired potion & snack boosts only when an expiration actually occurs
       setBuilderBoostEndTime((prev) => (prev && prev <= now ? null : prev));
       setLabBoostEndTime((prev) => (prev && prev <= now ? null : prev));
       setPetBoostEndTime((prev) => (prev && prev <= now ? null : prev));
+      setBuilderBiteEndTime((prev) => (prev && prev <= now ? null : prev));
+      setStudySoupEndTime((prev) => (prev && prev <= now ? null : prev));
     };
 
     const stopMasterInterval = () => {
@@ -4488,6 +4613,12 @@ export default function App() {
     setPetBoostEndTime(
       d.petBoostEndTime && d.petBoostEndTime > now ? d.petBoostEndTime : null
     );
+    setBuilderBiteEndTime(
+      d.builderBiteEndTime && d.builderBiteEndTime > now ? d.builderBiteEndTime : null
+    );
+    setStudySoupEndTime(
+      d.studySoupEndTime && d.studySoupEndTime > now ? d.studySoupEndTime : null
+    );
     setBuilderApprentice(d.builderApprentice || createDefaultBuilderApprentice());
     setLabApprentice(d.labApprentice || createDefaultLabApprentice());
     setThLevel(d.thLevel);
@@ -4523,6 +4654,8 @@ export default function App() {
         builderBoostEndTime,
         labBoostEndTime,
         petBoostEndTime,
+        builderBiteEndTime,
+        studySoupEndTime,
         builderApprentice,
         labApprentice,
         thLevel,
@@ -4572,6 +4705,8 @@ export default function App() {
     builderBoostEndTime,
     labBoostEndTime,
     petBoostEndTime,
+    builderBiteEndTime,
+    studySoupEndTime,
     builderApprentice,
     labApprentice,
     thLevel,
@@ -4901,12 +5036,13 @@ export default function App() {
   };
 
   // ============================================================================
-  // CURRENT REMAINING WORK HELPERS (ACCOUNTS FOR ACTIVE 10x / 24x & HELPER BOOSTS)
+  // CURRENT REMAINING WORK HELPERS (ACCOUNTS FOR ACTIVE 10x / 24x, SNACK & HELPER BOOSTS)
   // ============================================================================
   const getBuilderSlotCurrentRemainingSeconds = (
     slotIdx: number,
     overrideBuilderBoostEndTime: number | null = builderBoostEndTime,
-    overrideBuilderHelper: BuilderApprenticeState = builderApprentice
+    overrideBuilderHelper: BuilderApprenticeState = builderApprentice,
+    overrideBuilderBiteEndTime: number | null = builderBiteEndTime
   ): number => {
     const now = Date.now();
     const lockedItem = lockedResults.find((r) => r.builderIndex === slotIdx);
@@ -4920,7 +5056,9 @@ export default function App() {
         10,
         now,
         overrideBuilderHelper,
-        isAssignedHere
+        isAssignedHere,
+        overrideBuilderBiteEndTime,
+        'builder_bite'
       );
       return parts.totalUpgradeSeconds;
     }
@@ -4930,7 +5068,8 @@ export default function App() {
   const getLabSlotCurrentRemainingSeconds = (
     slot: 'main' | 'goblin',
     overrideLabBoostEndTime: number | null = labBoostEndTime,
-    overrideLabHelper: LabApprenticeState = labApprentice
+    overrideLabHelper: LabApprenticeState = labApprentice,
+    overrideStudySoupEndTime: number | null = studySoupEndTime
   ): number => {
     const now = Date.now();
     const targetTs = slot === 'main' ? targetLabTimestamp : targetGoblinLabTimestamp;
@@ -4944,7 +5083,9 @@ export default function App() {
         24,
         now,
         overrideLabHelper,
-        isAssignedHere
+        isAssignedHere,
+        overrideStudySoupEndTime,
+        'study_soup'
       );
       return parts.totalUpgradeSeconds;
     }
@@ -4952,7 +5093,8 @@ export default function App() {
   };
 
   const getPetSlotCurrentRemainingSeconds = (
-    overridePetBoostEndTime: number | null = petBoostEndTime
+    overridePetBoostEndTime: number | null = petBoostEndTime,
+    overrideStudySoupEndTime: number | null = studySoupEndTime
   ): number => {
     const now = Date.now();
     if (targetPetTimestamp && targetPetTimestamp > now) {
@@ -4962,7 +5104,11 @@ export default function App() {
         1,
         overridePetBoostEndTime,
         24,
-        now
+        now,
+        null,
+        false,
+        overrideStudySoupEndTime,
+        'study_soup'
       );
       return parts.totalUpgradeSeconds;
     }
@@ -4994,7 +5140,8 @@ export default function App() {
     activeLabBoostSecs = getRemainingBoostSeconds(labBoostEndTime),
     labHelper: LabApprenticeState = labApprentice,
     overrideMainRemSec?: number,
-    overrideGoblinRemSec?: number
+    overrideGoblinRemSec?: number,
+    activeStudySoupSecs = getRemainingBoostSeconds(studySoupEndTime)
   ) => {
     const now = Date.now();
     const mainRemSec =
@@ -5020,6 +5167,8 @@ export default function App() {
         potionCount,
         activePotionBoostSeconds: activeLabBoostSecs,
         potionRate: 24,
+        activeSnackBoostSeconds: activeStudySoupSecs,
+        snackType: 'study_soup',
         now,
       });
       nextMainTs = now + Math.round(realElapsedSec * 1000);
@@ -5041,6 +5190,8 @@ export default function App() {
         potionCount,
         activePotionBoostSeconds: activeLabBoostSecs,
         potionRate: 24,
+        activeSnackBoostSeconds: activeStudySoupSecs,
+        snackType: 'study_soup',
         now,
       });
       nextGoblinTs = now + Math.round(realElapsedSec * 1000);
@@ -5066,18 +5217,26 @@ export default function App() {
     targetVillageName: string = getActiveVillageName(activeAccountId),
     overrideLabBoostSeconds?: number,
     overrideLabHelper?: LabApprenticeState,
-    skipNotifications = false
+    skipNotifications = false,
+    overrideStudySoupSeconds?: number
   ) => {
     const activeLabBoostSecs =
       typeof overrideLabBoostSeconds === 'number'
         ? overrideLabBoostSeconds
         : getRemainingBoostSeconds(labBoostEndTime);
+    const activeStudySoupSecs =
+      typeof overrideStudySoupSeconds === 'number'
+        ? overrideStudySoupSeconds
+        : getRemainingBoostSeconds(studySoupEndTime);
     const res = computeLabScheduleValues(
       mainTimerVal,
       goblinTimerVal,
       potionCount,
       activeLabBoostSecs,
-      overrideLabHelper || labApprentice
+      overrideLabHelper || labApprentice,
+      undefined,
+      undefined,
+      activeStudySoupSecs
     );
     setTargetLabTimestamp(res.nextMainTs);
     setLabFormattedDate(res.nextMainDate);
@@ -5289,7 +5448,8 @@ export default function App() {
     petTimerVal: BuilderTime,
     potionCount: number,
     activePetBoostSecs = getRemainingBoostSeconds(petBoostEndTime),
-    overridePetRemSec?: number
+    overridePetRemSec?: number,
+    activeStudySoupSecs = getRemainingBoostSeconds(studySoupEndTime)
   ) => {
     const now = Date.now();
     const petRemSec =
@@ -5305,7 +5465,18 @@ export default function App() {
       };
     }
 
-    const realElapsedSec = calc24xRealTimeSeconds(petRemSec, potionCount, activePetBoostSecs);
+    const realElapsedSec = calcHelperSessionRealTimeSeconds({
+      remainingUpgradeSeconds: petRemSec,
+      helperLevel: 0,
+      helper: null,
+      isAssignedToSlot: false,
+      potionCount,
+      activePotionBoostSeconds: activePetBoostSecs,
+      potionRate: 24,
+      activeSnackBoostSeconds: activeStudySoupSecs,
+      snackType: 'study_soup',
+      now,
+    });
     const nextPetTs = now + Math.round(realElapsedSec * 1000);
     const savedSec = Math.max(0, petRemSec - realElapsedSec);
 
@@ -5322,13 +5493,24 @@ export default function App() {
     targetVillageId: string = activeAccountId,
     targetVillageName: string = getActiveVillageName(activeAccountId),
     overridePetBoostSeconds?: number,
-    skipNotifications = false
+    skipNotifications = false,
+    overrideStudySoupSeconds?: number
   ) => {
     const activePetBoostSecs =
       typeof overridePetBoostSeconds === 'number'
         ? overridePetBoostSeconds
         : getRemainingBoostSeconds(petBoostEndTime);
-    const res = computePetScheduleValues(petTimerVal, potionCount, activePetBoostSecs);
+    const activeStudySoupSecs =
+      typeof overrideStudySoupSeconds === 'number'
+        ? overrideStudySoupSeconds
+        : getRemainingBoostSeconds(studySoupEndTime);
+    const res = computePetScheduleValues(
+      petTimerVal,
+      potionCount,
+      activePetBoostSecs,
+      undefined,
+      activeStudySoupSecs
+    );
     setTargetPetTimestamp(res.nextPetTs);
     setPetFormattedDate(res.nextPetDate);
     setPetSavedText(res.nextPetSavedText);
@@ -5574,7 +5756,8 @@ export default function App() {
     potionCount: number,
     activeBuilderBoostSecs = getRemainingBoostSeconds(builderBoostEndTime),
     bHelper: BuilderApprenticeState = builderApprentice,
-    useLiveRemainingWork = false
+    useLiveRemainingWork = false,
+    activeBuilderBiteSecs = getRemainingBoostSeconds(builderBiteEndTime)
   ): { computedResults: LockedResultItem[]; computedSavedText: string } => {
     const calcTimestamp = Date.now();
     const activeBuildersCount = targetMode === 'single' ? 1 : targetNumBuilders;
@@ -5599,6 +5782,8 @@ export default function App() {
         potionCount,
         activePotionBoostSeconds: activeBuilderBoostSecs,
         potionRate: 10,
+        activeSnackBoostSeconds: activeBuilderBiteSecs,
+        snackType: 'builder_bite',
         now: calcTimestamp,
       });
 
@@ -5651,13 +5836,18 @@ export default function App() {
     targetVillageName: string = getActiveVillageName(activeAccountId),
     overrideBuilderBoostSeconds?: number,
     overrideBuilderHelper?: BuilderApprenticeState,
-    skipNotifications = false
+    skipNotifications = false,
+    overrideBuilderBiteSeconds?: number
   ): { computedResults: LockedResultItem[]; computedSavedText: string } => {
     const potions = Math.max(0, parseInt(targetPotionsStr, 10) || 0);
     const activeBuilderBoostSecs =
       typeof overrideBuilderBoostSeconds === 'number'
         ? overrideBuilderBoostSeconds
         : getRemainingBoostSeconds(builderBoostEndTime);
+    const activeBuilderBiteSecs =
+      typeof overrideBuilderBiteSeconds === 'number'
+        ? overrideBuilderBiteSeconds
+        : getRemainingBoostSeconds(builderBiteEndTime);
     const bHelper = overrideBuilderHelper || builderApprentice;
 
     const { computedResults, computedSavedText } = computeBuilderScheduleValues(
@@ -5667,7 +5857,8 @@ export default function App() {
       potions,
       activeBuilderBoostSecs,
       bHelper,
-      false
+      false,
+      activeBuilderBiteSecs
     );
 
     if (!skipNotifications) {
@@ -6158,6 +6349,8 @@ export default function App() {
       builderBoostEndTime,
       labBoostEndTime,
       petBoostEndTime,
+      builderBiteEndTime,
+      studySoupEndTime,
       builderApprentice,
       labApprentice,
     };
@@ -6368,7 +6561,7 @@ export default function App() {
       }
     }
 
-    // Extract active potion boost seconds directly from the `boosts` object (or root boost keys)
+    // Extract active potion & Magic Snack boost seconds directly from the `boosts` object (or root boost keys)
     const builderBoostSeconds = Math.max(
       0,
       Math.floor(
@@ -6396,6 +6589,27 @@ export default function App() {
           data.boosts?.pet_boost ??
             data.boosts?.pethouse_boost ??
             (data as Record<string, unknown>).pet_boost
+        ) || 0
+      )
+    );
+    // Magic Snacks Auto-Detection:
+    // - Builder Bite (2x speed, overridden by Builder Potion 10x): `data.boosts.builder_consumable`
+    // - Study Soup (4x speed, stacks additively with Research/Pet Potion 24x -> 27x): `data.boosts.lab_consumable`
+    const builderBiteSeconds = Math.max(
+      0,
+      Math.floor(
+        Number(
+          data.boosts?.builder_consumable ??
+            (data as Record<string, unknown>).builder_consumable
+        ) || 0
+      )
+    );
+    const studySoupSeconds = Math.max(
+      0,
+      Math.floor(
+        Number(
+          data.boosts?.lab_consumable ??
+            (data as Record<string, unknown>).lab_consumable
         ) || 0
       )
     );
@@ -6487,6 +6701,8 @@ export default function App() {
       builderBoostSeconds === 0 &&
       labBoostSeconds === 0 &&
       petBoostSeconds === 0 &&
+      builderBiteSeconds === 0 &&
+      studySoupSeconds === 0 &&
       rawHelpers.length === 0
     ) {
       showToast('error', 'No active Home Village upgrades found');
@@ -6500,6 +6716,10 @@ export default function App() {
       labBoostSeconds > 0 ? importNow + labBoostSeconds * 1000 : null;
     const nextPetBoostEndTime =
       petBoostSeconds > 0 ? importNow + petBoostSeconds * 1000 : null;
+    const nextBuilderBiteEndTime =
+      builderBiteSeconds > 0 ? importNow + builderBiteSeconds * 1000 : null;
+    const nextStudySoupEndTime =
+      studySoupSeconds > 0 ? importNow + studySoupSeconds * 1000 : null;
 
     // Map Builders (1..6 regular + slot 7 Goblin Builder) and detect Builder's Apprentice assignment
     const goblinBuilderItem = activeBuilderUpgrades.find((item) => item.extra === true);
@@ -6715,7 +6935,8 @@ export default function App() {
       targetVillageName,
       builderBoostSeconds,
       nextBuilderApprentice,
-      true
+      true,
+      builderBiteSeconds
     );
 
     const labSched = computeLabSchedule(
@@ -6726,7 +6947,8 @@ export default function App() {
       targetVillageName,
       labBoostSeconds,
       nextLabApprentice,
-      true
+      true,
+      studySoupSeconds
     );
     const petSched = computePetSchedule(
       nextPetTimer,
@@ -6734,7 +6956,8 @@ export default function App() {
       targetVillageId,
       targetVillageName,
       petBoostSeconds,
-      true
+      true,
+      studySoupSeconds
     );
 
     const assignedBuilderUpgradeFinishTs =
@@ -6805,6 +7028,8 @@ export default function App() {
     setBuilderBoostEndTime(nextBuilderBoostEndTime);
     setLabBoostEndTime(nextLabBoostEndTime);
     setPetBoostEndTime(nextPetBoostEndTime);
+    setBuilderBiteEndTime(nextBuilderBiteEndTime);
+    setStudySoupEndTime(nextStudySoupEndTime);
     setBuilderApprentice(nextBuilderApprentice);
     setLabApprentice(nextLabApprentice);
     setThLevel(parsedThLevel);
@@ -6837,6 +7062,8 @@ export default function App() {
       builderBoostEndTime: nextBuilderBoostEndTime,
       labBoostEndTime: nextLabBoostEndTime,
       petBoostEndTime: nextPetBoostEndTime,
+      builderBiteEndTime: nextBuilderBiteEndTime,
+      studySoupEndTime: nextStudySoupEndTime,
       builderApprentice: nextBuilderApprentice,
       labApprentice: nextLabApprentice,
       thLevel: parsedThLevel,
@@ -7055,9 +7282,9 @@ export default function App() {
     setTimersCollapsedState(true);
 
     // Switch to most relevant tab if builders are empty
-    if (totalLoadedBuilders > 0 || builderBoostSeconds > 0) {
+    if (totalLoadedBuilders > 0 || builderBoostSeconds > 0 || builderBiteSeconds > 0) {
       setActiveTab('builders');
-    } else if (activeLabUpgrades.length > 0 || labBoostSeconds > 0) {
+    } else if (activeLabUpgrades.length > 0 || labBoostSeconds > 0 || studySoupSeconds > 0) {
       setActiveTab('laboratory');
     } else if (activePetUpgrades.length > 0 || petBoostSeconds > 0) {
       setActiveTab('pethouse');
@@ -7075,7 +7302,9 @@ export default function App() {
     const activeBoostCount =
       (builderBoostSeconds > 0 ? 1 : 0) +
       (labBoostSeconds > 0 ? 1 : 0) +
-      (petBoostSeconds > 0 ? 1 : 0);
+      (petBoostSeconds > 0 ? 1 : 0) +
+      (builderBiteSeconds > 0 ? 1 : 0) +
+      (studySoupSeconds > 0 ? 1 : 0);
     if (activeBoostCount > 0) {
       summaryParts.push(`${activeBoostCount} active boost${activeBoostCount > 1 ? 's' : ''}`);
     }
@@ -7095,6 +7324,8 @@ export default function App() {
   const builderBoostRemSec = getRemainingBoostSeconds(builderBoostEndTime, nowTick);
   const labBoostRemSec = getRemainingBoostSeconds(labBoostEndTime, nowTick);
   const petBoostRemSec = getRemainingBoostSeconds(petBoostEndTime, nowTick);
+  const builderBiteRemSec = getRemainingBoostSeconds(builderBiteEndTime, nowTick);
+  const studySoupRemSec = getRemainingBoostSeconds(studySoupEndTime, nowTick);
 
   const builderPreview =
     pendingBuilderPotions > 0
@@ -7105,7 +7336,8 @@ export default function App() {
           pendingBuilderPotions,
           builderBoostRemSec,
           builderApprentice,
-          lockedResults.length > 0
+          lockedResults.length > 0,
+          builderBiteRemSec
         )
       : null;
 
@@ -7118,7 +7350,8 @@ export default function App() {
           0,
           builderBoostRemSec,
           builderApprentice,
-          false
+          false,
+          builderBiteRemSec
         )
       : null;
 
@@ -7157,7 +7390,8 @@ export default function App() {
           labBoostRemSec,
           labApprentice,
           getLabSlotCurrentRemainingSeconds('main'),
-          getLabSlotCurrentRemainingSeconds('goblin')
+          getLabSlotCurrentRemainingSeconds('goblin'),
+          studySoupRemSec
         )
       : null;
 
@@ -7180,7 +7414,8 @@ export default function App() {
           petTimer,
           petPotions,
           petBoostRemSec,
-          getPetSlotCurrentRemainingSeconds()
+          getPetSlotCurrentRemainingSeconds(),
+          studySoupRemSec
         )
       : null;
 
@@ -7334,19 +7569,77 @@ export default function App() {
     (targetLabTimestamp ? 1 : 0) + (targetGoblinLabTimestamp ? 1 : 0);
   const activePetQueueCount = targetPetTimestamp ? 1 : 0;
 
-  const activeBoostTags: string[] = [];
-  if (builderBoostRemSec > 0) activeBoostTags.push('Builder 10x');
-  if (labBoostRemSec > 0) activeBoostTags.push('Research 24x');
-  if (petBoostRemSec > 0) activeBoostTags.push('Pet 24x');
+  const activeBoostNodes: React.ReactNode[] = [];
+  if (builderBoostRemSec > 0) {
+    activeBoostNodes.push(
+      <span key="builder_potion" className="inline-flex items-center gap-1">
+        <img
+          src="./icons/art_builder_potion.webp"
+          alt="Builder Potion"
+          className="w-4 h-4 inline object-contain"
+        />
+        <span>Builder 10x</span>
+      </span>
+    );
+  }
+  if (labBoostRemSec > 0) {
+    activeBoostNodes.push(
+      <span key="research_potion" className="inline-flex items-center gap-1">
+        <img
+          src="./icons/art_research_potion.webp"
+          alt="Research Potion"
+          className="w-4 h-4 inline object-contain"
+        />
+        <span>Research 24x</span>
+      </span>
+    );
+  }
+  if (petBoostRemSec > 0) {
+    activeBoostNodes.push(
+      <span key="pet_potion" className="inline-flex items-center gap-1">
+        <img
+          src="./icons/art_pet_potion.webp"
+          alt="Pet Potion"
+          className="w-4 h-4 inline object-contain"
+        />
+        <span>Pet 24x</span>
+      </span>
+    );
+  }
+  if (builderBiteRemSec > 0) {
+    activeBoostNodes.push(
+      <span key="bite" className="inline-flex items-center gap-1">
+        <img
+          src="./icons/art_builder_bite.webp"
+          alt="Builder Bite"
+          className="w-4 h-4 inline object-contain"
+        />
+        <span>Bite 2x</span>
+      </span>
+    );
+  }
+  if (studySoupRemSec > 0) {
+    activeBoostNodes.push(
+      <span key="soup" className="inline-flex items-center gap-1">
+        <img
+          src="./icons/art_study_soup.webp"
+          alt="Study Soup"
+          className="w-4 h-4 inline object-contain"
+        />
+        <span>Soup 4x</span>
+      </span>
+    );
+  }
   if (isBuilderHelperWorking) {
-    activeBoostTags.push(`Builder Apprentice ${getHelperSpeedMultiplier(builderApprentice.level)}x`);
+    activeBoostNodes.push(
+      `Builder Apprentice ${getHelperSpeedMultiplier(builderApprentice.level)}x`
+    );
   }
   if (isLabHelperWorking) {
-    activeBoostTags.push(`Lab Apprentice ${getHelperSpeedMultiplier(labApprentice.level)}x`);
+    activeBoostNodes.push(
+      `Lab Apprentice ${getHelperSpeedMultiplier(labApprentice.level)}x`
+    );
   }
-
-  const boostHeadlineStatus =
-    activeBoostTags.length > 0 ? activeBoostTags.join(' · ') : 'No active boosts';
 
   const boostSublineStatus = (() => {
     if (builderHelperTargetName) {
@@ -7700,11 +7993,20 @@ export default function App() {
                 Your village, boosted
               </h3>
               <p
-                className={`text-xs font-bold mt-0.5 truncate ${
-                  activeBoostTags.length > 0 ? 'text-[#4ADE80]' : 'text-[#CBD5E1]'
+                className={`text-xs font-bold mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 ${
+                  activeBoostNodes.length > 0 ? 'text-[#4ADE80]' : 'text-[#CBD5E1]'
                 }`}
               >
-                {boostHeadlineStatus}
+                {activeBoostNodes.length > 0 ? (
+                  activeBoostNodes.map((node, i) => (
+                    <React.Fragment key={i}>
+                      {i > 0 && <span className="opacity-70">•</span>}
+                      <span>{node}</span>
+                    </React.Fragment>
+                  ))
+                ) : (
+                  'No active boosts'
+                )}
               </p>
               <p className="text-[11px] font-medium text-[#8E9AA8] truncate">
                 {boostSublineStatus}
@@ -8872,6 +9174,8 @@ export default function App() {
                           )}
                           potionBoostEndTime={builderBoostEndTime}
                           potionSpeedMultiplier={10}
+                          snackBoostEndTime={builderBiteEndTime}
+                          snackType="builder_bite"
                           onActionClick={() => setAssignModalType('builder')}
                           onFinish={() => handleBuilderUpgradeFinished(item.builderIndex)}
                         />
@@ -8926,6 +9230,8 @@ export default function App() {
                       helperSpeedMultiplier={getHelperSpeedMultiplier(labApprentice.level)}
                       potionBoostEndTime={labBoostEndTime}
                       potionSpeedMultiplier={24}
+                      snackBoostEndTime={studySoupEndTime}
+                      snackType="study_soup"
                       onActionClick={() => setAssignModalType('lab')}
                       onFinish={() => handleLabUpgradeFinished('main')}
                     />
@@ -8954,6 +9260,8 @@ export default function App() {
                       helperSpeedMultiplier={getHelperSpeedMultiplier(labApprentice.level)}
                       potionBoostEndTime={labBoostEndTime}
                       potionSpeedMultiplier={24}
+                      snackBoostEndTime={studySoupEndTime}
+                      snackType="study_soup"
                       onActionClick={() => setAssignModalType('lab')}
                       onFinish={() => handleLabUpgradeFinished('goblin')}
                     />
@@ -9012,6 +9320,8 @@ export default function App() {
                   displayDate={displayedPetDate}
                   potionBoostEndTime={petBoostEndTime}
                   potionSpeedMultiplier={24}
+                  snackBoostEndTime={studySoupEndTime}
+                  snackType="study_soup"
                   onActionClick={() => {
                     setIsBoostDrawerOpen(true);
                     handleCategoryTabChange('pethouse');
