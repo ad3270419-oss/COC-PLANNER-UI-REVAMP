@@ -7494,10 +7494,10 @@ export default function App() {
                     type="button"
                     onClick={(e) => handleOpenRenameModal(activeAccountProfile, e)}
                     title={`Rename or manage ${activeAccountProfile.name}`}
-                    className="tactile inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-bold text-[#8E9AA8] hover:text-[#F3CA65] cursor-pointer"
+                    className="tactile inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-[#2A303C] hover:bg-[#343C4B] border border-white/20 text-[11px] font-bold text-white hover:text-[#F3CA65] shadow-sm cursor-pointer transition-colors"
                   >
-                    <span className="truncate max-w-[110px]">{activeAccountProfile.name}</span>
-                    <span>✏️</span>
+                    <span className="truncate max-w-[120px]">{activeAccountProfile.name}</span>
+                    <span className="text-[10px]">✏️</span>
                   </button>
                 )}
               </div>
