@@ -11,6 +11,13 @@ import {
   getTownHallIconSrc,
   resolveUpgradeIconSources,
 } from './cocAssets';
+import {
+  FiveMonthUpgradeHistory,
+  type MonthUpgradeHistoryData,
+  type PotionHistoryBreakdownItem,
+  type StandardUpgradeHistoryItem,
+  type WallUpgradeHistoryItem,
+} from './components/FiveMonthUpgradeHistory';
 
 export const COC_NAMES: Record<string | number, string> = {
   // Town Hall & Key Buildings
@@ -277,6 +284,7 @@ interface RawCoCItem {
   data?: number | string;
   id?: number | string;
   lvl?: number;
+  cnt?: number;
   timer?: number;
   extra?: boolean;
   helper_cooldown?: number;
@@ -347,6 +355,13 @@ export interface VillageHistoryUpgradeEntry {
   name: string;
   startLevel: number;
   currentLevel: number;
+  completedDate?: string;
+}
+
+export interface VillageWallHistoryEntry {
+  fromLevel: number;
+  lvl: number;
+  upgradedCount: number;
 }
 
 export interface VillageMonthlyHistory {
@@ -354,8 +369,11 @@ export interface VillageMonthlyHistory {
     builder: VillageHistoryPotionStat;
     research: VillageHistoryPotionStat;
     pet: VillageHistoryPotionStat;
+    builderBite?: VillageHistoryPotionStat;
+    studySoup?: VillageHistoryPotionStat;
   };
   upgrades: Record<string, VillageHistoryUpgradeEntry>;
+  walls?: Record<string, VillageWallHistoryEntry>;
 }
 
 function createEmptyVillageMonthlyHistory(): VillageMonthlyHistory {
@@ -364,8 +382,11 @@ function createEmptyVillageMonthlyHistory(): VillageMonthlyHistory {
       builder: { used: 0, timeSavedMinutes: 0 },
       research: { used: 0, timeSavedMinutes: 0 },
       pet: { used: 0, timeSavedMinutes: 0 },
+      builderBite: { used: 0, timeSavedMinutes: 0 },
+      studySoup: { used: 0, timeSavedMinutes: 0 },
     },
     upgrades: {},
+    walls: {},
   };
 }
 
@@ -385,6 +406,14 @@ function getVillageBaselineStorageKey(
   return cleanedTag ? `village_baseline_${yearMonthKey}_${cleanedTag}` : null;
 }
 
+function getVillageWallBaselineStorageKey(
+  playerTag: string | undefined | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): string | null {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  return cleanedTag ? `village_wall_baseline_${yearMonthKey}_${cleanedTag}` : null;
+}
+
 function hasVillageBaselineInStorage(
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
@@ -401,6 +430,54 @@ function hasVillageBaselineInStorage(
       !Array.isArray(parsed) &&
       Object.keys(parsed as Record<string, unknown>).length > 0
     );
+  } catch {
+    return false;
+  }
+}
+
+function hasVillageMonthlyDataInStorage(
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): boolean {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  if (!cleanedTag) return false;
+
+  if (hasVillageBaselineInStorage(cleanedTag, yearMonthKey)) {
+    return true;
+  }
+
+  const legacyStats = loadMonthlyStatsForTag(cleanedTag, yearMonthKey);
+  if (
+    legacyStats.builderPotionsCount > 0 ||
+    legacyStats.researchPotionsCount > 0 ||
+    legacyStats.petPotionsCount > 0 ||
+    legacyStats.builderSecondsSaved > 0 ||
+    legacyStats.labSecondsSaved > 0 ||
+    legacyStats.petSecondsSaved > 0
+  ) {
+    return true;
+  }
+
+  try {
+    const scopedKey = getScopedVillageHistoryStorageKey(cleanedTag, yearMonthKey);
+    if (!scopedKey) return false;
+    const raw = localStorage.getItem(scopedKey);
+    if (!raw) return false;
+    const parsed = normalizeVillageMonthlyHistory(JSON.parse(raw));
+    const hasPotions =
+      parsed.potions.builder.used > 0 ||
+      parsed.potions.research.used > 0 ||
+      parsed.potions.pet.used > 0 ||
+      (parsed.potions.builderBite?.used ?? 0) > 0 ||
+      (parsed.potions.studySoup?.used ?? 0) > 0 ||
+      parsed.potions.builder.timeSavedMinutes > 0 ||
+      parsed.potions.research.timeSavedMinutes > 0 ||
+      parsed.potions.pet.timeSavedMinutes > 0 ||
+      (parsed.potions.builderBite?.timeSavedMinutes ?? 0) > 0 ||
+      (parsed.potions.studySoup?.timeSavedMinutes ?? 0) > 0;
+    const hasUpgrades = Object.keys(parsed.upgrades).length > 0;
+    const hasWalls = Boolean(parsed.walls && Object.keys(parsed.walls).length > 0);
+    return hasPotions || hasUpgrades || hasWalls;
   } catch {
     return false;
   }
@@ -441,6 +518,8 @@ function normalizeVillageMonthlyHistory(raw: unknown): VillageMonthlyHistory {
   const upgrades: Record<string, VillageHistoryUpgradeEntry> = {};
 
   for (const [id, entryVal] of Object.entries(rawUpgrades)) {
+    // Home Village Walls (1000010) are tracked exclusively via the Multi-Level Wall Diff Calculator
+    if (id === '1000010') continue;
     if (!entryVal || typeof entryVal !== 'object' || Array.isArray(entryVal)) continue;
     const rec = entryVal as Record<string, unknown>;
     const startLevel =
@@ -459,7 +538,35 @@ function normalizeVillageMonthlyHistory(raw: unknown): VillageMonthlyHistory {
             : resolveUpgradeName(id, `Item ${id}`),
         startLevel,
         currentLevel,
+        completedDate:
+          typeof rec.completedDate === 'string' && rec.completedDate.trim()
+            ? rec.completedDate.trim()
+            : undefined,
       };
+    }
+  }
+
+  const rawWalls =
+    obj.walls && typeof obj.walls === 'object' && !Array.isArray(obj.walls)
+      ? (obj.walls as Record<string, unknown>)
+      : {};
+  const walls: Record<string, VillageWallHistoryEntry> = {};
+  for (const [lvlKey, wallVal] of Object.entries(rawWalls)) {
+    if (!wallVal || typeof wallVal !== 'object' || Array.isArray(wallVal)) continue;
+    const rec = wallVal as Record<string, unknown>;
+    const lvl =
+      typeof rec.lvl === 'number' && Number.isFinite(rec.lvl) ? Math.floor(rec.lvl) : 0;
+    const fromLevel =
+      typeof rec.fromLevel === 'number' && Number.isFinite(rec.fromLevel)
+        ? Math.floor(rec.fromLevel)
+        : Math.max(1, lvl - 1);
+    const upgradedCount =
+      typeof rec.upgradedCount === 'number' && Number.isFinite(rec.upgradedCount)
+        ? Math.max(0, Math.floor(rec.upgradedCount))
+        : 0;
+    // Save ONLY positive calculated wall differences
+    if (lvl > 1 && upgradedCount > 0) {
+      walls[lvlKey] = { fromLevel, lvl, upgradedCount };
     }
   }
 
@@ -468,8 +575,11 @@ function normalizeVillageMonthlyHistory(raw: unknown): VillageMonthlyHistory {
       builder: parsePotionStat(rawPotions.builder),
       research: parsePotionStat(rawPotions.research),
       pet: parsePotionStat(rawPotions.pet),
+      builderBite: parsePotionStat(rawPotions.builderBite),
+      studySoup: parsePotionStat(rawPotions.studySoup),
     },
     upgrades,
+    walls,
   };
 }
 
@@ -485,6 +595,7 @@ function saveVillageMonthlyHistory(
   const payload = JSON.stringify({
     potions: history.potions,
     upgrades: history.upgrades,
+    walls: history.walls || {},
   });
   try {
     // Remove any legacy un-scoped global key so data can never bleed across accounts
@@ -593,6 +704,8 @@ function loadVillageMonthlyHistory(
         used: mergedPetUsed,
         timeSavedMinutes: mergedPetMins,
       },
+      builderBite: history.potions.builderBite || { used: 0, timeSavedMinutes: 0 },
+      studySoup: history.potions.studySoup || { used: 0, timeSavedMinutes: 0 },
     },
   };
 
@@ -605,19 +718,25 @@ function loadVillageMonthlyHistory(
     petPotionsCount: mergedPetUsed,
     petSecondsSaved: mergedPetMins * 60,
   };
-  saveMonthlySectionStatsForTag(cleanedTag, 'builders', syncedSectionStats, yearMonthKey);
-  saveMonthlySectionStatsForTag(cleanedTag, 'lab', syncedSectionStats, yearMonthKey);
-  saveMonthlySectionStatsForTag(cleanedTag, 'pethouse', syncedSectionStats, yearMonthKey);
-
-  // If no baseline snapshot exists yet for this village & month, upgrades must remain empty
+  // If no baseline snapshot exists yet for this village & month, upgrades and walls must remain empty
   if (!hasVillageBaselineInStorage(cleanedTag, yearMonthKey)) {
     history = {
       ...history,
       upgrades: {},
+      walls: {},
     };
   }
 
-  saveVillageMonthlyHistory(history, cleanedTag, yearMonthKey);
+  // Only persist back if this is the active current month or if the month already has real data
+  if (
+    yearMonthKey === getCurrentYearMonthKey() ||
+    hasVillageMonthlyDataInStorage(cleanedTag, yearMonthKey)
+  ) {
+    saveMonthlySectionStatsForTag(cleanedTag, 'builders', syncedSectionStats, yearMonthKey);
+    saveMonthlySectionStatsForTag(cleanedTag, 'lab', syncedSectionStats, yearMonthKey);
+    saveMonthlySectionStatsForTag(cleanedTag, 'pethouse', syncedSectionStats, yearMonthKey);
+    saveVillageMonthlyHistory(history, cleanedTag, yearMonthKey);
+  }
   return history;
 }
 
@@ -660,9 +779,140 @@ function saveVillageBaselineLevels(
   }
 }
 
+function loadVillageWallCountsMap(storageKey: string | null): Record<string, number> | null {
+  try {
+    if (!storageKey) return null;
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const result: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+        result[k] = Math.floor(v);
+      }
+    }
+    return Object.keys(result).length > 0 ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadVillageWallBaseline(
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): Record<string, number> | null {
+  return loadVillageWallCountsMap(getVillageWallBaselineStorageKey(playerTag, yearMonthKey));
+}
+
+function saveVillageWallBaseline(
+  wallCounts: Record<string, number>,
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): void {
+  const key = getVillageWallBaselineStorageKey(playerTag, yearMonthKey);
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(wallCounts));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 /**
- * Extracts a snapshot map `{ [dataId]: currentLevel }` for all Buildings, Traps,
- * Heroes, Pets, Spells, Units, Siege Machines, and Helpers in the imported village JSON.
+ * Step 1 & 2 of Multi-Level Wall Diff Algorithm:
+ * Extracts all wall objects (`data: 1000010`) from a village JSON (or saved wall map)
+ * and maps them by level (`Map<Level, Count>`).
+ * Example wall objects in `buildings`:
+ * `[{"data":1000010, "lvl":17, "cnt":200}, {"data":1000010, "lvl":18, "cnt":125}]`
+ */
+function extractWallLevelMap(
+  source: RawCoCVillage | Record<string, number> | null | undefined
+): Map<number, number> {
+  const wallMap = new Map<number, number>();
+  if (!source || typeof source !== 'object') return wallMap;
+
+  if ('buildings' in source && Array.isArray((source as RawCoCVillage).buildings)) {
+    const buildings = (source as RawCoCVillage).buildings || [];
+    for (const item of buildings) {
+      if (!item) continue;
+      const itemId = String(item.data ?? item.id ?? '').trim();
+      if (itemId !== '1000010') continue;
+      const lvl =
+        typeof item.lvl === 'number' && Number.isFinite(item.lvl) ? Math.floor(item.lvl) : 0;
+      const cnt =
+        typeof item.cnt === 'number' && Number.isFinite(item.cnt) && item.cnt > 0
+          ? Math.floor(item.cnt)
+          : 1;
+      if (lvl > 0 && cnt > 0) {
+        wallMap.set(lvl, (wallMap.get(lvl) ?? 0) + cnt);
+      }
+    }
+    return wallMap;
+  }
+
+  for (const [lvlStr, cntVal] of Object.entries(source as Record<string, unknown>)) {
+    const lvl = Number(lvlStr);
+    const cnt =
+      typeof cntVal === 'number' && Number.isFinite(cntVal) ? Math.floor(cntVal) : 0;
+    if (Number.isFinite(lvl) && lvl > 0 && cnt > 0) {
+      wallMap.set(lvl, (wallMap.get(lvl) ?? 0) + cnt);
+    }
+  }
+  return wallMap;
+}
+
+function wallLevelMapToRecord(wallMap: Map<number, number>): Record<string, number> {
+  const record: Record<string, number> = {};
+  for (const [lvl, cnt] of wallMap.entries()) {
+    if (lvl > 0 && cnt > 0) {
+      record[String(lvl)] = cnt;
+    }
+  }
+  return record;
+}
+
+/**
+ * Multi-Level Wall Diff Calculator:
+ * 1. Extract all wall objects (`data: 1000010`) from both Old and New JSON.
+ * 2. Map them by level (`Map<Level, Count>`).
+ * 3. Compare the counts for each level. If the New JSON count for a specific level
+ *    is HIGHER than the Old JSON count, the positive difference is the number of
+ *    walls upgraded TO that level.
+ * 4. Save ONLY this calculated positive difference to the current month's history log.
+ */
+function calculateMultiLevelWallDiffs(
+  oldWallsSource: RawCoCVillage | Record<string, number>,
+  newWallsSource: RawCoCVillage | Record<string, number>,
+  existingMonthWallLog: Record<string, VillageWallHistoryEntry> = {}
+): Record<string, VillageWallHistoryEntry> {
+  const oldWallMap = extractWallLevelMap(oldWallsSource);
+  const newWallMap = extractWallLevelMap(newWallsSource);
+  const nextWallLog: Record<string, VillageWallHistoryEntry> = {
+    ...existingMonthWallLog,
+  };
+
+  for (const [lvl, newCount] of newWallMap.entries()) {
+    if (lvl <= 1) continue;
+    const oldCount = oldWallMap.get(lvl) ?? 0;
+    if (newCount > oldCount) {
+      const positiveDiff = newCount - oldCount;
+      const lvlKey = String(lvl);
+      const previouslyLogged = nextWallLog[lvlKey]?.upgradedCount ?? 0;
+      nextWallLog[lvlKey] = {
+        fromLevel: lvl - 1,
+        lvl,
+        upgradedCount: previouslyLogged + positiveDiff,
+      };
+    }
+  }
+
+  return nextWallLog;
+}
+
+/**
+ * Extracts a snapshot map `{ [dataId]: currentLevel }` for all Buildings (excluding Walls),
+ * Traps, Heroes, Pets, Spells, Units, Siege Machines, and Helpers in the imported village JSON.
  */
 function extractVillageLevelsFromJson(parsedData: RawCoCVillage): Record<string, number> {
   const allItems: RawCoCItem[] = [
@@ -680,11 +930,13 @@ function extractVillageLevelsFromJson(parsedData: RawCoCVillage): Record<string,
   for (const rawItem of allItems) {
     if (!rawItem) continue;
     const itemId = String(rawItem.data ?? rawItem.id ?? '').trim();
+    // Skip Home Village Walls (1000010); handled by Multi-Level Wall Diff Calculator
+    if (!itemId || itemId === '1000010') continue;
     const itemLvl =
       typeof rawItem.lvl === 'number' && Number.isFinite(rawItem.lvl)
         ? Math.floor(rawItem.lvl)
         : 0;
-    if (!itemId || itemLvl <= 0) continue;
+    if (itemLvl <= 0) continue;
     if (snapshotLevels[itemId] === undefined || itemLvl > snapshotLevels[itemId]) {
       snapshotLevels[itemId] = itemLvl;
     }
@@ -697,10 +949,13 @@ function extractVillageLevelsFromJson(parsedData: RawCoCVillage): Record<string,
  * 1. Checks if `village_baseline_${YYYY_MM}_${PLAYER_TAG}` exists in localStorage.
  * 2. IF IT DOES NOT EXIST (First import of the month):
  *    - Saves all current JSON levels directly into `village_baseline_${YYYY_MM}_${PLAYER_TAG}`.
- *    - Does NOT register any items as completed upgrades in `village_history` (`upgrades: {}`).
+ *    - Saves the initial Wall `Map<Level, Count>` into `village_wall_baseline_${YYYY_MM}_${PLAYER_TAG}`.
+ *    - Does NOT register any items as completed upgrades in `village_history` (`upgrades: {}, walls: {}`).
  * 3. IF THE BASELINE ALREADY EXISTS (Subsequent imports):
- *    - Compares newly imported JSON levels against the stored `village_baseline_${YYYY_MM}_${PLAYER_TAG}`.
- *    - Logs an item into `village_history_${YYYY_MM}_${PLAYER_TAG}` ONLY if `newLevel > baselineLevel`.
+ *    - Compares newly imported JSON levels against `village_baseline_${YYYY_MM}_${PLAYER_TAG}`.
+ *    - Runs the Multi-Level Wall Diff Calculator comparing the OLD saved wall map against
+ *      the NEWly imported JSON wall map, saving ONLY positive differences to `history.walls`,
+ *      and then updates the saved wall map to the newly imported JSON.
  */
 function syncMonthlyBaselineAndHistoryOnImport(
   parsedData: RawCoCVillage,
@@ -708,19 +963,27 @@ function syncMonthlyBaselineAndHistoryOnImport(
   yearMonthKey = getCurrentYearMonthKey()
 ): VillageMonthlyHistory {
   const importedLevels = extractVillageLevelsFromJson(parsedData);
+  const newWallRecord = wallLevelMapToRecord(extractWallLevelMap(parsedData));
   const existingBaseline = loadVillageBaselineLevels(playerTag, yearMonthKey);
+  const oldWallRecord = loadVillageWallBaseline(playerTag, yearMonthKey);
   const currentHistory = loadVillageMonthlyHistory(playerTag, yearMonthKey);
 
   // 1. FIRST IMPORT OF THE MONTH (NO BASELINE EXISTS YET)
   if (!existingBaseline) {
     saveVillageBaselineLevels(importedLevels, playerTag, yearMonthKey);
+    if (Object.keys(newWallRecord).length > 0) {
+      saveVillageWallBaseline(newWallRecord, playerTag, yearMonthKey);
+    }
     const initialHistory: VillageMonthlyHistory = {
       potions: {
         builder: { ...currentHistory.potions.builder },
         research: { ...currentHistory.potions.research },
         pet: { ...currentHistory.potions.pet },
+        builderBite: { ...(currentHistory.potions.builderBite || { used: 0, timeSavedMinutes: 0 }) },
+        studySoup: { ...(currentHistory.potions.studySoup || { used: 0, timeSavedMinutes: 0 }) },
       },
       upgrades: {}, // Strictly empty on first baseline snapshot import
+      walls: {},
     };
     saveVillageMonthlyHistory(initialHistory, playerTag, yearMonthKey);
     return initialHistory;
@@ -730,9 +993,16 @@ function syncMonthlyBaselineAndHistoryOnImport(
   const nextUpgrades: Record<string, VillageHistoryUpgradeEntry> = {
     ...currentHistory.upgrades,
   };
+  delete nextUpgrades['1000010'];
+
   let baselineUpdatedWithNewUnlocks = false;
+  const todayShortLabel = new Date().toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  });
 
   for (const [itemId, newLevel] of Object.entries(importedLevels)) {
+    if (itemId === '1000010') continue;
     const baselineLevel = existingBaseline[itemId];
 
     if (typeof baselineLevel === 'number') {
@@ -742,6 +1012,8 @@ function syncMonthlyBaselineAndHistoryOnImport(
           name: resolveUpgradeName(itemId, `Item ${itemId}`),
           startLevel: baselineLevel,
           currentLevel: newLevel,
+          completedDate:
+            currentHistory.upgrades[itemId]?.completedDate || todayShortLabel,
         };
       }
     } else {
@@ -755,13 +1027,28 @@ function syncMonthlyBaselineAndHistoryOnImport(
     saveVillageBaselineLevels(existingBaseline, playerTag, yearMonthKey);
   }
 
+  // Multi-Level Wall Diff Calculator: compare OLD saved wall map vs NEW imported wall map
+  let nextWalls: Record<string, VillageWallHistoryEntry> = {
+    ...(currentHistory.walls || {}),
+  };
+  if (Object.keys(newWallRecord).length > 0) {
+    if (oldWallRecord) {
+      nextWalls = calculateMultiLevelWallDiffs(oldWallRecord, parsedData, nextWalls);
+    }
+    // Update the saved wall snapshot so the next JSON import compares against this JSON
+    saveVillageWallBaseline(newWallRecord, playerTag, yearMonthKey);
+  }
+
   const updatedHistory: VillageMonthlyHistory = {
     potions: {
       builder: { ...currentHistory.potions.builder },
       research: { ...currentHistory.potions.research },
       pet: { ...currentHistory.potions.pet },
+      builderBite: { ...(currentHistory.potions.builderBite || { used: 0, timeSavedMinutes: 0 }) },
+      studySoup: { ...(currentHistory.potions.studySoup || { used: 0, timeSavedMinutes: 0 }) },
     },
     upgrades: nextUpgrades,
+    walls: nextWalls,
   };
 
   saveVillageMonthlyHistory(updatedHistory, playerTag, yearMonthKey);
@@ -941,6 +1228,8 @@ interface LastImportedBoostState {
   builder?: BoostImportTrackEntry;
   lab?: BoostImportTrackEntry;
   pet?: BoostImportTrackEntry;
+  builderBite?: BoostImportTrackEntry;
+  studySoup?: BoostImportTrackEntry;
 }
 
 function getLastImportedBoostStorageKey(playerTag: string): string {
@@ -4307,6 +4596,13 @@ export default function App() {
   const [summaryModalSection, setSummaryModalSection] = useState<
     'builders' | 'lab' | 'pethouse' | null
   >(null);
+  const [isFiveMonthArchiveOpen, setIsFiveMonthArchiveOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (summaryModalSection === null) {
+      setIsFiveMonthArchiveOpen(false);
+    }
+  }, [summaryModalSection]);
 
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
@@ -7152,6 +7448,13 @@ export default function App() {
         return trackedEntry;
       };
 
+      const prevActiveBuilderBiteEndTime = !isAddingNewAccount
+        ? existingActiveProfileBeforeImport?.data?.builderBiteEndTime ?? builderBiteEndTime
+        : null;
+      const prevActiveStudySoupEndTime = !isAddingNewAccount
+        ? existingActiveProfileBeforeImport?.data?.studySoupEndTime ?? studySoupEndTime
+        : null;
+
       const effectivePrevBuilderEntry = resolveEffectivePrevBoostEntry(
         prevBoostTrack.builder,
         prevActiveBuilderBoostEndTime
@@ -7163,6 +7466,14 @@ export default function App() {
       const effectivePrevPetEntry = resolveEffectivePrevBoostEntry(
         prevBoostTrack.pet,
         prevActivePetBoostEndTime
+      );
+      const effectivePrevBuilderBiteEntry = resolveEffectivePrevBoostEntry(
+        prevBoostTrack.builderBite,
+        prevActiveBuilderBiteEndTime
+      );
+      const effectivePrevStudySoupEntry = resolveEffectivePrevBoostEntry(
+        prevBoostTrack.studySoup,
+        prevActiveStudySoupEndTime
       );
 
       const builderBoostTrack = computeNewlyCreditedBoostPotions(
@@ -7183,6 +7494,18 @@ export default function App() {
         importNow,
         jsonExportTimestamp
       );
+      const builderBiteTrack = computeNewlyCreditedBoostPotions(
+        builderBiteSeconds,
+        effectivePrevBuilderBiteEntry,
+        importNow,
+        jsonExportTimestamp
+      );
+      const studySoupTrack = computeNewlyCreditedBoostPotions(
+        studySoupSeconds,
+        effectivePrevStudySoupEntry,
+        importNow,
+        jsonExportTimestamp
+      );
 
       const nextBoostTrackState: LastImportedBoostState = {};
       if (builderBoostTrack.nextEntry) {
@@ -7193,6 +7516,12 @@ export default function App() {
       }
       if (petBoostTrack.nextEntry) {
         nextBoostTrackState.pet = petBoostTrack.nextEntry;
+      }
+      if (builderBiteTrack.nextEntry) {
+        nextBoostTrackState.builderBite = builderBiteTrack.nextEntry;
+      }
+      if (studySoupTrack.nextEntry) {
+        nextBoostTrackState.studySoup = studySoupTrack.nextEntry;
       }
       saveLastImportedBoostState(resolvedImportPlayerTag, nextBoostTrackState);
 
@@ -7227,6 +7556,44 @@ export default function App() {
         const addedPetMins = 23 * 60 * petBoostTrack.potionsToCredit;
         preImportHistory.potions.pet.used += petBoostTrack.potionsToCredit;
         preImportHistory.potions.pet.timeSavedMinutes += addedPetMins;
+        didCreditBoostPotions = true;
+      }
+
+      if (builderBiteTrack.potionsToCredit > 0) {
+        const activeBuildersForBite =
+          totalLoadedBuilders > 0 ? totalLoadedBuilders : nextBuilderSliderCount;
+        // Builder Bite is 2x speed (+1h saved per builder per 1h snack when not overridden by Builder Potion)
+        const addedBiteMins =
+          builderBoostSeconds > 0
+            ? 0
+            : activeBuildersForBite * 1 * 60 * builderBiteTrack.potionsToCredit;
+        const curBite = preImportHistory.potions.builderBite || {
+          used: 0,
+          timeSavedMinutes: 0,
+        };
+        preImportHistory.potions.builderBite = {
+          used: curBite.used + builderBiteTrack.potionsToCredit,
+          timeSavedMinutes: curBite.timeSavedMinutes + addedBiteMins,
+        };
+        didCreditBoostPotions = true;
+      }
+
+      if (studySoupTrack.potionsToCredit > 0) {
+        const activeLabPetSlotsForSoup = Math.max(
+          1,
+          (standardLabItem ? 1 : 0) + (goblinLabItem ? 1 : 0) + (activePetItem ? 1 : 0)
+        );
+        // Study Soup is 4x speed (+3h saved per active lab/pet slot per 1h snack)
+        const addedSoupMins =
+          activeLabPetSlotsForSoup * 3 * 60 * studySoupTrack.potionsToCredit;
+        const curSoup = preImportHistory.potions.studySoup || {
+          used: 0,
+          timeSavedMinutes: 0,
+        };
+        preImportHistory.potions.studySoup = {
+          used: curSoup.used + studySoupTrack.potionsToCredit,
+          timeSavedMinutes: curSoup.timeSavedMinutes + addedSoupMins,
+        };
         didCreditBoostPotions = true;
       }
 
@@ -10151,16 +10518,187 @@ export default function App() {
 
       {/* Comprehensive Monthly Progress Modal ("VILLAGE STATS - [MONTH NAME]") */}
       {summaryModalSection !== null && (() => {
-        // Strictly fetch monthly history using the currently active village's player_tag
+        // Strictly fetch monthly history using the currently active village's player_tag (or account id)
         const activeModalPlayerTag = (activeAccountProfile?.tag || activePlayerTag || '')
           .trim()
           .toUpperCase();
+        const activeModalAccountKey = activeModalPlayerTag || activeAccountProfile.id;
         const activeModalHistory = activeModalPlayerTag
           ? loadVillageMonthlyHistory(activeModalPlayerTag, activeYearMonthKey)
           : createEmptyVillageMonthlyHistory();
         const completedUpgradesEntries = Object.entries(activeModalHistory.upgrades).filter(
           ([, u]) => u.currentLevel > u.startLevel
         );
+
+        /**
+         * Pure Viewer for the 5-Month Upgrade History & Stats tab:
+         * Reads the exact same `village_history_${YYYY_MM}_${TAG}` localStorage data
+         * saved by Village Monthly Progress. If a month has no data in localStorage,
+         * returns `hasData: false` so the UI displays "No data for this month".
+         */
+        const buildAccountMonthArchiveData = (
+          accountKey: string,
+          yearMonthKey: string,
+          monthLabel: string
+        ): MonthUpgradeHistoryData => {
+          const cleanKey = accountKey.trim().toUpperCase();
+          const hasData = hasVillageMonthlyDataInStorage(cleanKey, yearMonthKey);
+          if (!cleanKey || !hasData) {
+            return {
+              monthKey: yearMonthKey,
+              monthLabel,
+              hasData: false,
+              totalUpgrades: 0,
+              timeSavedText: '0m',
+              potionsBreakdown: [],
+              heroes: [],
+              pethouse: [],
+              laboratory: [],
+              buildings: [],
+              walls: [],
+            };
+          }
+
+          const history = loadVillageMonthlyHistory(cleanKey, yearMonthKey);
+
+          const builderBiteStat = history.potions.builderBite || {
+            used: 0,
+            timeSavedMinutes: 0,
+          };
+          const studySoupStat = history.potions.studySoup || {
+            used: 0,
+            timeSavedMinutes: 0,
+          };
+
+          const totalMinutesSaved =
+            history.potions.builder.timeSavedMinutes +
+            history.potions.research.timeSavedMinutes +
+            history.potions.pet.timeSavedMinutes +
+            builderBiteStat.timeSavedMinutes +
+            studySoupStat.timeSavedMinutes;
+          const timeSavedText = formatCumulativeModalTime(totalMinutesSaved * 60);
+
+          const potionsBreakdown: PotionHistoryBreakdownItem[] = [
+            {
+              key: 'builder',
+              name: 'Builder Potion',
+              iconSrc: './icons/art_builder_potion.webp',
+              usedCount: history.potions.builder.used,
+              timeSavedText: formatCumulativeModalTime(
+                history.potions.builder.timeSavedMinutes * 60
+              ),
+              accentTextClass: 'text-[#4ADE80]',
+              badgeColorClass: 'bg-amber-500/15 text-[#F3CA65] border-amber-400/35',
+            },
+            {
+              key: 'research',
+              name: 'Research Potion',
+              iconSrc: './icons/art_research_potion.webp',
+              usedCount: history.potions.research.used,
+              timeSavedText: formatCumulativeModalTime(
+                history.potions.research.timeSavedMinutes * 60
+              ),
+              accentTextClass: 'text-[#93C5FD]',
+              badgeColorClass: 'bg-indigo-500/15 text-[#A5B4FC] border-indigo-400/35',
+            },
+            {
+              key: 'pet',
+              name: 'Pet Potion',
+              iconSrc: './icons/art_pet_potion.webp',
+              usedCount: history.potions.pet.used,
+              timeSavedText: formatCumulativeModalTime(
+                history.potions.pet.timeSavedMinutes * 60
+              ),
+              accentTextClass: 'text-[#4ADE80]',
+              badgeColorClass: 'bg-emerald-500/15 text-[#4ADE80] border-emerald-400/35',
+            },
+            {
+              key: 'builderBite',
+              name: 'Builder Bite',
+              iconSrc: './icons/art_builder_bite.webp',
+              usedCount: builderBiteStat.used,
+              timeSavedText: formatCumulativeModalTime(
+                builderBiteStat.timeSavedMinutes * 60
+              ),
+              accentTextClass: 'text-[#F3CA65]',
+              badgeColorClass: 'bg-amber-500/15 text-[#F3CA65] border-amber-400/35',
+            },
+            {
+              key: 'studySoup',
+              name: 'Study Soup',
+              iconSrc: './icons/art_study_soup.webp',
+              usedCount: studySoupStat.used,
+              timeSavedText: formatCumulativeModalTime(
+                studySoupStat.timeSavedMinutes * 60
+              ),
+              accentTextClass: 'text-[#93C5FD]',
+              badgeColorClass: 'bg-sky-500/15 text-[#93C5FD] border-sky-400/35',
+            },
+          ];
+
+          const heroes: StandardUpgradeHistoryItem[] = [];
+          const pethouse: StandardUpgradeHistoryItem[] = [];
+          const laboratory: StandardUpgradeHistoryItem[] = [];
+          const buildings: StandardUpgradeHistoryItem[] = [];
+          const defaultDateLabel = monthLabel.split(' ')[0] || monthLabel;
+
+          for (const [itemId, entry] of Object.entries(history.upgrades)) {
+            if (entry.currentLevel <= entry.startLevel) continue;
+            if (itemId === '1000010') continue;
+
+            const stdItem: StandardUpgradeHistoryItem = {
+              id: `${cleanKey}_${yearMonthKey}_${itemId}`,
+              rawId: itemId,
+              name: entry.name || resolveUpgradeName(itemId, `Item ${itemId}`),
+              fromLevel: entry.startLevel,
+              toLevel: entry.currentLevel,
+              completedDate: entry.completedDate || defaultDateLabel,
+            };
+
+            if (itemId.startsWith('28')) {
+              heroes.push(stdItem);
+            } else if (itemId.startsWith('73')) {
+              pethouse.push(stdItem);
+            } else if (itemId.startsWith('400') || itemId.startsWith('260')) {
+              laboratory.push(stdItem);
+            } else {
+              buildings.push(stdItem);
+            }
+          }
+
+          // Read ONLY the positive calculated wall differences from the month's history log
+          const walls: WallUpgradeHistoryItem[] = Object.values(history.walls || {})
+            .filter((w) => w.lvl > 1 && w.upgradedCount > 0)
+            .sort((a, b) => a.lvl - b.lvl)
+            .map((w) => ({
+              id: `wall_diff_${cleanKey}_${yearMonthKey}_${w.lvl}`,
+              data: 1000010 as const,
+              fromLevel: w.fromLevel,
+              lvl: w.lvl,
+              upgradedCount: w.upgradedCount,
+            }));
+
+          const totalUpgrades =
+            heroes.length +
+            pethouse.length +
+            laboratory.length +
+            buildings.length +
+            walls.reduce((sum, w) => sum + w.upgradedCount, 0);
+
+          return {
+            monthKey: yearMonthKey,
+            monthLabel,
+            hasData: true,
+            totalUpgrades,
+            timeSavedText,
+            potionsBreakdown,
+            heroes,
+            pethouse,
+            laboratory,
+            buildings,
+            walls,
+          };
+        };
 
         return (
           <div
@@ -10208,166 +10746,253 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Scrollable Body (Top: Potion Analytics + Middle: Upgrades List) */}
+              {/* Scrollable Body */}
               <div className="overflow-y-auto space-y-4 pr-0.5 flex-1">
-                {/* Top Section: Potion Analytics (3-Row Categorized List) */}
-                <div className="space-y-2">
-                  <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase px-0.5 block">
-                    POTION ANALYTICS
-                  </span>
-
-                  <div className="space-y-2">
-                    {/* Row 1: Builder Potions */}
-                    <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                {isFiveMonthArchiveOpen ? (
+                  <FiveMonthUpgradeHistory
+                    accountKey={activeModalAccountKey}
+                    accountName={activeAccountProfile.name}
+                    nowTick={nowTick}
+                    loadAccountMonthData={buildAccountMonthArchiveData}
+                    onBackToSummary={() => {
+                      triggerHaptic(12);
+                      setIsFiveMonthArchiveOpen(false);
+                    }}
+                  />
+                ) : (
+                  <>
+                    {/* Option to open 5-Month Upgrade History & Stats tab */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic(15);
+                        setIsFiveMonthArchiveOpen(true);
+                      }}
+                      className="tactile w-full rounded-2xl p-3 bg-[#161B26] hover:bg-[#1E2534] border border-[#F3CA65]/35 flex items-center justify-between gap-3 text-left cursor-pointer transition-all"
+                    >
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
-                          <img
-                            src="/icons/art_builder_potion.webp"
-                            alt="Builder Potion"
-                            className="w-full h-full object-contain"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).style.display = 'none';
-                            }}
-                          />
+                        <div className="w-9 h-9 rounded-xl bg-[#1E2534] border border-[#2D364A] flex items-center justify-center text-[#F3CA65] shrink-0 text-sm">
+                          📅
                         </div>
                         <div className="min-w-0">
-                          <p className="text-xs sm:text-[13px] font-bold text-white truncate">
-                            Builder Potions Used:{' '}
-                            <span className="text-[#F3CA65] font-extrabold">
-                              {activeModalHistory.potions.builder.used}
-                            </span>
+                          <p className="text-xs sm:text-[13px] font-extrabold text-white truncate">
+                            5-Month Upgrade History &amp; Stats
                           </p>
-                          <p className="text-[11px] font-semibold text-[#8E9AA8]">
-                            Time Saved:{' '}
-                            <span className="text-[#4ADE80] font-bold">
-                              {formatCumulativeModalTime(
-                                activeModalHistory.potions.builder.timeSavedMinutes * 60
-                              )}
-                            </span>
+                          <p className="text-[11px] font-medium text-[#8E9AA8] truncate">
+                            Open 5-month archive by category &amp; walls
                           </p>
                         </div>
                       </div>
-                    </div>
+                      <span className="px-2.5 py-1 rounded-xl bg-[#F3CA65]/15 border border-[#F3CA65]/35 text-[11px] font-extrabold text-[#F3CA65] shrink-0">
+                        Open ▸
+                      </span>
+                    </button>
 
-                    {/* Row 2: Research Potions */}
-                    <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
-                          <img
-                            src="/icons/art_research_potion.webp"
-                            alt="Research Potion"
-                            className="w-full h-full object-contain"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).style.display = 'none';
-                            }}
-                          />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-xs sm:text-[13px] font-bold text-white truncate">
-                            Research Potions Used:{' '}
-                            <span className="text-[#F3CA65] font-extrabold">
-                              {activeModalHistory.potions.research.used}
-                            </span>
-                          </p>
-                          <p className="text-[11px] font-semibold text-[#8E9AA8]">
-                            Time Saved:{' '}
-                            <span className="text-[#93C5FD] font-bold">
-                              {formatCumulativeModalTime(
-                                activeModalHistory.potions.research.timeSavedMinutes * 60
-                              )}
-                            </span>
-                          </p>
-                        </div>
-                      </div>
-                    </div>
+                    {/* Top Section: Potion Analytics (3-Row Categorized List) */}
+                    <div className="space-y-2">
+                      <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase px-0.5 block">
+                        POTION ANALYTICS
+                      </span>
 
-                    {/* Row 3: Pet Potions */}
-                    <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
-                          <img
-                            src="/icons/art_pet_potion.webp"
-                            alt="Pet Potion"
-                            className="w-full h-full object-contain"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).style.display = 'none';
-                            }}
-                          />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-xs sm:text-[13px] font-bold text-white truncate">
-                            Pet Potions Used:{' '}
-                            <span className="text-[#F3CA65] font-extrabold">
-                              {activeModalHistory.potions.pet.used}
-                            </span>
-                          </p>
-                          <p className="text-[11px] font-semibold text-[#8E9AA8]">
-                            Time Saved:{' '}
-                            <span className="text-[#4ADE80] font-bold">
-                              {formatCumulativeModalTime(
-                                activeModalHistory.potions.pet.timeSavedMinutes * 60
-                              )}
-                            </span>
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Middle Section: The Upgrades List */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between px-0.5">
-                    <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase">
-                      UPGRADES COMPLETED THIS MONTH
-                    </span>
-                    <span className="text-[11px] font-bold text-[#8E9AA8] tabular-nums">
-                      {completedUpgradesEntries.length}
-                    </span>
-                  </div>
-
-                  {completedUpgradesEntries.length > 0 ? (
-                    <div className="space-y-2 max-h-60 overflow-y-auto pr-0.5">
-                      {completedUpgradesEntries.map(([itemId, entry]) => (
-                        <div
-                          key={itemId}
-                          className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3"
-                        >
+                      <div className="space-y-2">
+                        {/* Row 1: Builder Potions */}
+                        <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
                           <div className="flex items-center gap-3 min-w-0">
-                            <UpgradeAssetIcon
-                              rawId={itemId}
-                              upgradeTitle={entry.name}
-                              upgradeLevel={entry.startLevel}
-                              targetLevel={entry.currentLevel}
-                              className="!w-12 !h-12"
-                            />
+                            <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                              <img
+                                src="/icons/art_builder_potion.webp"
+                                alt="Builder Potion"
+                                className="w-full h-full object-contain"
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLImageElement).style.display = 'none';
+                                }}
+                              />
+                            </div>
                             <div className="min-w-0">
-                              <p className="text-sm font-bold text-white truncate">
-                                {entry.name}
+                              <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                                Builder Potions Used:{' '}
+                                <span className="text-[#F3CA65] font-extrabold">
+                                  {activeModalHistory.potions.builder.used}
+                                </span>
                               </p>
-                              <p className="text-xs font-bold text-[#F3CA65]/90 mt-0.5">
-                                Lvl {entry.startLevel} →{' '}
-                                <span className="text-[#4ADE80]">{entry.currentLevel}</span>
+                              <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                                Time Saved:{' '}
+                                <span className="text-[#4ADE80] font-bold">
+                                  {formatCumulativeModalTime(
+                                    activeModalHistory.potions.builder.timeSavedMinutes * 60
+                                  )}
+                                </span>
                               </p>
                             </div>
                           </div>
-                          <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-lg bg-[#4ADE80]/15 text-[#4ADE80] border border-[#4ADE80]/30 shrink-0">
-                            +{entry.currentLevel - entry.startLevel}
-                          </span>
                         </div>
-                      ))}
+
+                        {/* Row 2: Research Potions */}
+                        <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                              <img
+                                src="/icons/art_research_potion.webp"
+                                alt="Research Potion"
+                                className="w-full h-full object-contain"
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLImageElement).style.display = 'none';
+                                }}
+                              />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                                Research Potions Used:{' '}
+                                <span className="text-[#F3CA65] font-extrabold">
+                                  {activeModalHistory.potions.research.used}
+                                </span>
+                              </p>
+                              <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                                Time Saved:{' '}
+                                <span className="text-[#93C5FD] font-bold">
+                                  {formatCumulativeModalTime(
+                                    activeModalHistory.potions.research.timeSavedMinutes * 60
+                                  )}
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Row 3: Pet Potions */}
+                        <div className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-10 h-10 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1 flex items-center justify-center shrink-0">
+                              <img
+                                src="/icons/art_pet_potion.webp"
+                                alt="Pet Potion"
+                                className="w-full h-full object-contain"
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLImageElement).style.display = 'none';
+                                }}
+                              />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-xs sm:text-[13px] font-bold text-white truncate">
+                                Pet Potions Used:{' '}
+                                <span className="text-[#F3CA65] font-extrabold">
+                                  {activeModalHistory.potions.pet.used}
+                                </span>
+                              </p>
+                              <p className="text-[11px] font-semibold text-[#8E9AA8]">
+                                Time Saved:{' '}
+                                <span className="text-[#4ADE80] font-bold">
+                                  {formatCumulativeModalTime(
+                                    activeModalHistory.potions.pet.timeSavedMinutes * 60
+                                  )}
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                  ) : (
-                    <div className="rounded-2xl p-4 bg-[#161B26] border border-[#2A303C] text-center space-y-1">
-                      <p className="text-xs font-bold text-white">
-                        No level increases logged yet this month
-                      </p>
-                      <p className="text-[11px] text-[#8E9AA8] leading-relaxed">
-                        Import your village JSON periodically to automatically compare and track buildings, heroes, troops, spells, and pets upgraded this month.
-                      </p>
-                    </div>
-                  )}
-                </div>
+
+                    {/* Middle Section: The Upgrades List */}
+                    {(() => {
+                      const completedWallEntries = Object.values(activeModalHistory.walls || {})
+                        .filter((w) => w.lvl > 1 && w.upgradedCount > 0)
+                        .sort((a, b) => a.lvl - b.lvl);
+                      const totalCompletedCount =
+                        completedUpgradesEntries.length +
+                        completedWallEntries.reduce((sum, w) => sum + w.upgradedCount, 0);
+
+                      return (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between px-0.5">
+                            <span className="text-[10px] font-extrabold tracking-[0.16em] text-[#F3CA65] uppercase">
+                              UPGRADES COMPLETED THIS MONTH
+                            </span>
+                            <span className="text-[11px] font-bold text-[#8E9AA8] tabular-nums">
+                              {totalCompletedCount}
+                            </span>
+                          </div>
+
+                          {completedUpgradesEntries.length > 0 ||
+                          completedWallEntries.length > 0 ? (
+                            <div className="space-y-2 max-h-60 overflow-y-auto pr-0.5">
+                              {completedUpgradesEntries.map(([itemId, entry]) => (
+                                <div
+                                  key={itemId}
+                                  className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3"
+                                >
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <UpgradeAssetIcon
+                                      rawId={itemId}
+                                      upgradeTitle={entry.name}
+                                      upgradeLevel={entry.startLevel}
+                                      targetLevel={entry.currentLevel}
+                                      className="!w-12 !h-12"
+                                    />
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-bold text-white truncate">
+                                        {entry.name}
+                                      </p>
+                                      <p className="text-xs font-bold text-[#F3CA65]/90 mt-0.5">
+                                        Lvl {entry.startLevel} →{' '}
+                                        <span className="text-[#4ADE80]">
+                                          {entry.currentLevel}
+                                        </span>
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-lg bg-[#4ADE80]/15 text-[#4ADE80] border border-[#4ADE80]/30 shrink-0">
+                                    +{entry.currentLevel - entry.startLevel}
+                                  </span>
+                                </div>
+                              ))}
+
+                              {completedWallEntries.map((wall) => (
+                                <div
+                                  key={`wall_${wall.lvl}`}
+                                  className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3"
+                                >
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <div className="w-12 h-12 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1.5 flex items-center justify-center shrink-0">
+                                      <img
+                                        src="./icons/art_1000010.webp"
+                                        alt="Wall"
+                                        className="w-full h-full object-contain"
+                                      />
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-bold text-white truncate">
+                                        Wall
+                                      </p>
+                                      <p className="text-xs font-bold text-[#F3CA65]/90 mt-0.5">
+                                        Lvl {wall.fromLevel} ➔ {wall.lvl}{' '}
+                                        <span className="text-[#4ADE80]">
+                                          (x{wall.upgradedCount} upgraded)
+                                        </span>
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-lg bg-[#4ADE80]/15 text-[#4ADE80] border border-[#4ADE80]/30 shrink-0">
+                                    x{wall.upgradedCount}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="rounded-2xl p-4 bg-[#161B26] border border-[#2A303C] text-center space-y-1">
+                              <p className="text-xs font-bold text-white">
+                                No level increases logged yet this month
+                              </p>
+                              <p className="text-[11px] text-[#8E9AA8] leading-relaxed">
+                                Import your village JSON periodically to automatically compare and track buildings, heroes, troops, spells, pets, and walls upgraded this month.
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
               </div>
 
               {/* Bottom: Gold Close Button (#F3CA65) */}
