@@ -199,24 +199,21 @@ function sanitizeClonedDocumentForHtml2Canvas(clonedDoc: Document, clonedCard: H
       }
     }
 
-    // 2. Detach clonedCard from any modal ancestors (which have bg-black/85 oklab styles)
-    //    and mount it directly onto clonedDoc.body at (0, 0)
-    clonedDoc.body.style.margin = '0';
-    clonedDoc.body.style.padding = '0';
-    clonedDoc.body.style.backgroundColor = '#0B0E14';
-    clonedDoc.body.style.color = '#FFFFFF';
-    clonedCard.style.position = 'relative';
-    clonedCard.style.top = '0';
-    clonedCard.style.left = '0';
-    clonedCard.style.margin = '0';
-    clonedCard.style.zIndex = '1';
-    clonedDoc.body.replaceChildren(clonedCard);
+    // 2. Keep clonedCard at its exact DOM coordinates (do NOT reparent or move it,
+    //    otherwise html2canvas's pre-computed bounding box & text range rects desync).
+    //    Instead, sanitize any oklch/oklab computed colors in-place on ancestors & descendants.
+    const ancestors: HTMLElement[] = [];
+    let cur: HTMLElement | null = clonedCard.parentElement;
+    while (cur) {
+      ancestors.push(cur);
+      cur = cur.parentElement;
+    }
 
-    // 3. Ensure all computed color properties on clonedCard and its descendants are standard rgb/rgba
     const win = clonedDoc.defaultView || window;
     const nodes = [
       clonedDoc.documentElement,
       clonedDoc.body,
+      ...ancestors,
       clonedCard,
       ...Array.from(clonedCard.querySelectorAll<HTMLElement>('*')),
     ];
@@ -241,14 +238,13 @@ function sanitizeClonedDocumentForHtml2Canvas(clonedDoc: Document, clonedCard: H
         }
       }
       if (cs.boxShadow && (cs.boxShadow.includes('okl') || cs.boxShadow.includes('color('))) {
-        node.style.boxShadow = '0 16px 36px rgba(0, 0, 0, 0.65)';
+        node.style.boxShadow = 'none';
       }
       if (
         cs.backgroundImage &&
         (cs.backgroundImage.includes('okl') || cs.backgroundImage.includes('color('))
       ) {
-        node.style.backgroundImage =
-          'linear-gradient(180deg, #0E1320 0%, #0B0E14 55%, #080B11 100%)';
+        node.style.backgroundImage = 'none';
       }
     }
   } catch {
@@ -372,9 +368,9 @@ async function renderVisualWrappedCanvasWithIcons(params: {
 }): Promise<HTMLCanvasElement> {
   const { accountName, playerTag, townHallLevel, monthData } = params;
   const SCALE = 3;
-  const CARD_W = 420;
+  const CARD_W = 450;
   const PAD = 16;
-  const INNER_W = CARD_W - PAD * 2; // 388
+  const INNER_W = CARD_W - PAD * 2; // 418
 
   // 1. Resolve and preload Town Hall icon
   const thUpgradeInMonth = monthData.buildings.find(
@@ -1046,7 +1042,8 @@ const InlineResolvedIcon: React.FC<{
   fromLevel?: number;
   toLevel?: number;
   category: 'builders' | 'laboratory' | 'pethouse';
-}> = ({ rawId, name, fromLevel, toLevel, category }) => {
+  className?: string;
+}> = ({ rawId, name, fromLevel, toLevel, category, className }) => {
   const sources = resolveUpgradeIconSources({
     rawId,
     upgradeTitle: name,
@@ -1069,7 +1066,7 @@ const InlineResolvedIcon: React.FC<{
     <img
       src={sources[idx]}
       alt={name}
-      className="w-5 h-5 inline object-contain shrink-0"
+      className={className || 'w-5 h-5 inline object-contain shrink-0'}
       onError={() => {
         if (idx + 1 < sources.length) {
           setIdx((prev) => prev + 1);
@@ -1082,11 +1079,11 @@ const InlineResolvedIcon: React.FC<{
 };
 
 /**
- * Hidden Compact Infographic Card ("CLASH WRAPPED").
- * - Fixed width `w-[420px] h-auto` off-screen (`fixed top-[-9999px] left-[-9999px]`)
- * - Uses pure #hex and rgba(...) values (zero Tailwind v4 oklch/oklab functions) so html2canvas renders cleanly
- * - Header displays the village's Town Hall icon (`getTownHallIconSrc` / `art_1000001.webp`)
- * - Compact horizontal pill layout (`flex flex-wrap gap-1.5`) showing ONLY icon + level transition
+ * Hidden Compact Infographic Card ("CLASH WRAPPED") — 100% html2canvas-safe layout:
+ * - Wrapper hidden with `absolute top-[-9999px] left-[-9999px]` (never `hidden` / `display: none`)
+ * - Fixed width `w-[450px] h-auto`
+ * - ZERO `grid` or `gap` utilities anywhere inside the card
+ * - Uses `flex`, `flex-wrap`, and explicit margins (`mr-2 mb-2`) on all pills so html2canvas never misaligns or overlaps text
  * - CRITICAL RULE: Shows ONLY UPGRADES. Zero mentions of Potions, Magic Snacks, or Time Saved.
  */
 export const ClashWrappedInfographicCard = React.forwardRef<
@@ -1157,21 +1154,21 @@ export const ClashWrappedInfographicCard = React.forwardRef<
   return (
     <div
       aria-hidden="true"
-      className="fixed top-[-9999px] left-[-9999px] pointer-events-none select-none z-[-1]"
+      className="absolute top-[-9999px] left-[-9999px] pointer-events-none select-none"
     >
-      {/* Fixed-width, auto-height compact container using pure hex/rgba colors for html2canvas */}
+      {/* Fixed-width w-[450px] h-auto container with ZERO grid/gap for html2canvas alignment */}
       <div
         ref={ref}
-        className="w-[420px] h-auto rounded-3xl p-4 bg-[linear-gradient(180deg,#0E1320_0%,#0B0E14_55%,#080B11_100%)] border border-[rgba(243,202,101,0.38)] flex flex-col gap-2.5 text-[#FFFFFF] font-sans relative overflow-hidden"
+        className="w-[450px] h-auto rounded-3xl p-4 bg-[#0B0E14] border border-[rgba(243,202,101,0.38)] text-[#FFFFFF] font-sans relative overflow-hidden"
       >
-        {/* 1. Compact Header with Village Town Hall Icon */}
-        <div className="flex items-center justify-between gap-2.5 border-b border-[rgba(255,255,255,0.1)] pb-2.5">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-11 h-11 rounded-xl bg-[#161D2E] border border-[rgba(243,202,101,0.42)] p-1 flex items-center justify-center shrink-0">
+        {/* 1. Compact Header with Village Town Hall Icon (margin-spaced, no gap) */}
+        <div className="flex items-center justify-between border-b border-[rgba(255,255,255,0.1)] pb-3 mb-3">
+          <div className="flex items-center min-w-0 mr-3">
+            <div className="w-11 h-11 rounded-xl bg-[#161D2E] border border-[rgba(243,202,101,0.42)] p-1 flex items-center justify-center shrink-0 mr-2.5">
               <img
                 src={thIconSrc}
                 alt="Town Hall"
-                className="w-full h-full object-contain"
+                className="w-9 h-9 object-contain"
                 onError={() => {
                   if (thIconSrc !== '/icons/art_1000001.webp') {
                     setThIconSrc('/icons/art_1000001.webp');
@@ -1180,14 +1177,14 @@ export const ClashWrappedInfographicCard = React.forwardRef<
               />
             </div>
             <div className="min-w-0">
-              <p className="text-[9px] font-black tracking-[0.18em] text-[#F3CA65] uppercase leading-tight">
+              <p className="text-[9px] font-black tracking-[0.18em] text-[#F3CA65] uppercase leading-tight mb-0.5">
                 CLASH PLANNER · WRAPPED
               </p>
               <h2 className="text-base font-black text-[#FFFFFF] tracking-tight truncate leading-snug">
                 {accountName}
               </h2>
               {playerTag ? (
-                <p className="text-[10px] font-bold font-mono text-[#4ADE80] truncate leading-tight">
+                <p className="text-[10px] font-bold font-mono text-[#4ADE80] truncate leading-tight mt-0.5">
                   {playerTag}
                 </p>
               ) : null}
@@ -1201,13 +1198,13 @@ export const ClashWrappedInfographicCard = React.forwardRef<
           </div>
         </div>
 
-        {/* 2. Highlighted Total Upgrades Completed Banner */}
-        <div className="rounded-2xl px-3.5 py-2.5 bg-[#141A29] border border-[rgba(243,202,101,0.4)] flex items-center justify-between gap-3">
-          <div>
+        {/* 2. Highlighted Total Upgrades Completed Banner (margin-spaced, no gap) */}
+        <div className="rounded-2xl px-3.5 py-2.5 bg-[#141A29] border border-[rgba(243,202,101,0.4)] flex items-center justify-between mb-3">
+          <div className="mr-3">
             <p className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#8E9AA8]">
               Total Upgrades Completed
             </p>
-            <p className="text-[11px] font-bold text-[#CBD5E1]">
+            <p className="text-[11px] font-bold text-[#CBD5E1] mt-0.5">
               Monthly Village Progress
             </p>
           </div>
@@ -1216,18 +1213,18 @@ export const ClashWrappedInfographicCard = React.forwardRef<
           </span>
         </div>
 
-        {/* 3. Categorized Upgrades — Compact Horizontal Pill Layout (Icon + Level Transition ONLY) */}
-        <div className="space-y-2">
+        {/* 3. Categorized Upgrades — html2canvas-safe Flex-Wrap Pills using mr-2 mb-2 margins */}
+        <div>
           {categoryBlocks.map((block) => {
             if (block.items.length === 0) return null;
             return (
               <div
                 key={block.key}
-                className="rounded-2xl bg-[#121724] border border-[#242D42] p-2.5 space-y-1.5"
+                className="rounded-2xl bg-[#121724] border border-[#242D42] p-3 mb-2.5"
               >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center gap-1.5">
-                    <span>{block.icon}</span>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center">
+                    <span className="mr-1.5">{block.icon}</span>
                     <span>{block.title}</span>
                   </span>
                   <span className="text-[10px] font-black text-[#4ADE80] tabular-nums">
@@ -1235,12 +1232,12 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                   </span>
                 </div>
 
-                {/* Dense Horizontal Flex-Wrap Pill Grid */}
-                <div className="flex flex-wrap gap-1.5">
+                {/* Flex-Wrap Pill Container using mr-2 mb-2 (NO gap or grid) */}
+                <div className="flex flex-wrap -mb-2">
                   {block.items.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center gap-1.5 bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.12)] p-1.5 rounded-lg"
+                      className="inline-flex items-center bg-[rgba(255,255,255,0.10)] border border-[rgba(255,255,255,0.14)] rounded px-2 py-1 mr-2 mb-2"
                     >
                       <InlineResolvedIcon
                         rawId={item.rawId}
@@ -1248,15 +1245,16 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                         fromLevel={item.fromLevel}
                         toLevel={item.toLevel}
                         category={block.categoryType}
+                        className="w-4 h-4 mr-1.5 object-contain shrink-0"
                       />
-                      <span className="text-xs font-bold text-[#FFFFFF] tabular-nums leading-none">
+                      <span className="text-xs font-bold text-[#FFFFFF] tabular-nums whitespace-nowrap">
                         {item.fromLevel} ➔ {item.toLevel}
+                        {(item.count ?? 1) > 1 ? (
+                          <span className="text-[#4ADE80] font-extrabold ml-1">
+                            (x{item.count})
+                          </span>
+                        ) : null}
                       </span>
-                      {(item.count ?? 1) > 1 && (
-                        <span className="text-[11px] font-extrabold text-[#4ADE80] tabular-nums leading-none">
-                          (x{item.count})
-                        </span>
-                      )}
                     </div>
                   ))}
                 </div>
@@ -1264,12 +1262,12 @@ export const ClashWrappedInfographicCard = React.forwardRef<
             );
           })}
 
-          {/* Walls Visual Block — Compact Horizontal Pills */}
+          {/* Walls Visual Block — Flex-Wrap Pills using mr-2 mb-2 (NO gap or grid) */}
           {monthData.walls.length > 0 && (
-            <div className="rounded-2xl bg-[#121724] border border-[#242D42] p-2.5 space-y-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center gap-1.5">
-                  <span>🧱</span>
+            <div className="rounded-2xl bg-[#121724] border border-[#242D42] p-3 mb-2.5">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center">
+                  <span className="mr-1.5">🧱</span>
                   <span>Walls</span>
                 </span>
                 <span className="text-[10px] font-black text-[#4ADE80] tabular-nums">
@@ -1277,22 +1275,22 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                 </span>
               </div>
 
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap -mb-2">
                 {monthData.walls.map((wall) => (
                   <div
                     key={wall.id}
-                    className="flex items-center gap-1.5 bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.12)] p-1.5 rounded-lg"
+                    className="inline-flex items-center bg-[rgba(255,255,255,0.10)] border border-[rgba(255,255,255,0.14)] rounded px-2 py-1 mr-2 mb-2"
                   >
                     <img
                       src="./icons/art_1000010.webp"
                       alt="Wall"
-                      className="w-5 h-5 object-contain shrink-0"
+                      className="w-4 h-4 mr-1.5 object-contain shrink-0"
                     />
-                    <span className="text-xs font-bold text-[#FFFFFF] tabular-nums leading-none">
+                    <span className="text-xs font-bold text-[#FFFFFF] tabular-nums whitespace-nowrap">
                       {wall.fromLevel} ➔ {wall.lvl}
-                    </span>
-                    <span className="text-[11px] font-extrabold text-[#4ADE80] tabular-nums leading-none">
-                      (x{wall.upgradedCount})
+                      <span className="text-[#4ADE80] font-extrabold ml-1">
+                        (x{wall.upgradedCount})
+                      </span>
                     </span>
                   </div>
                 ))}
@@ -1301,7 +1299,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
           )}
 
           {monthData.totalUpgrades === 0 && (
-            <div className="rounded-2xl bg-[#121724] border border-[#242D42] p-3.5 text-center">
+            <div className="rounded-2xl bg-[#121724] border border-[#242D42] p-3.5 mb-2.5 text-center">
               <p className="text-xs font-bold text-[#8E9AA8]">
                 No completed upgrades logged for {monthData.monthLabel} yet.
               </p>
@@ -1310,7 +1308,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
         </div>
 
         {/* Compact Footer */}
-        <div className="pt-2 border-t border-[rgba(255,255,255,0.1)] flex items-center justify-between text-[9px] font-extrabold uppercase tracking-widest text-[#8E9AA8]">
+        <div className="pt-2 mt-1 border-t border-[rgba(255,255,255,0.1)] flex items-center justify-between text-[9px] font-extrabold uppercase tracking-widest text-[#8E9AA8]">
           <span>CLASH PLANNER</span>
           <span className="text-[#F3CA65]">VILLAGE UPGRADE ARCHIVE</span>
         </div>

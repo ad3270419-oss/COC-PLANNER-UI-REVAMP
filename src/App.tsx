@@ -316,6 +316,7 @@ interface RawCoCVillage {
   buildings?: RawCoCItem[];
   traps?: RawCoCItem[];
   heroes?: RawCoCItem[];
+  troops?: RawCoCItem[];
   units?: RawCoCItem[];
   spells?: RawCoCItem[];
   siege_machines?: RawCoCItem[];
@@ -423,12 +424,28 @@ function getVillageWallBaselineStorageKey(
   return cleanedTag ? `village_wall_baseline_${yearMonthKey}_${cleanedTag}` : null;
 }
 
-function getVillageBuildingFreqStorageKey(
+function getVillageRealFreqSnapshotStorageKey(
   playerTag: string | undefined | null,
   yearMonthKey = getCurrentYearMonthKey()
 ): string | null {
   const cleanedTag = playerTag?.trim().toUpperCase();
-  return cleanedTag ? `village_building_freq_${yearMonthKey}_${cleanedTag}` : null;
+  return cleanedTag ? `village_real_freq_snapshot_${yearMonthKey}_${cleanedTag}` : null;
+}
+
+function getLegacyCorruptedFreqStorageKey(
+  playerTag: string | undefined | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): string | null {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  return cleanedTag ? `village_universal_freq_${yearMonthKey}_${cleanedTag}` : null;
+}
+
+function getVillageLatestFreqStorageKey(
+  playerTag: string | undefined | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): string | null {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  return cleanedTag ? `village_universal_latest_${yearMonthKey}_${cleanedTag}` : null;
 }
 
 function hasVillageBaselineInStorage(
@@ -460,6 +477,11 @@ function hasVillageMonthlyDataInStorage(
   if (!cleanedTag) return false;
 
   if (hasVillageBaselineInStorage(cleanedTag, yearMonthKey)) {
+    return true;
+  }
+
+  const realSnapshotKey = getVillageRealFreqSnapshotStorageKey(cleanedTag, yearMonthKey);
+  if (realSnapshotKey && localStorage.getItem(realSnapshotKey)) {
     return true;
   }
 
@@ -936,19 +958,40 @@ function calculateMultiLevelWallDiffs(
   return nextWallLog;
 }
 
-function loadVillageBuildingFreqBaseline(
+function loadVillageRealFreqSnapshot(
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
 ): Record<string, number> | null {
-  return loadVillageWallCountsMap(getVillageBuildingFreqStorageKey(playerTag, yearMonthKey));
+  return loadVillageWallCountsMap(getVillageRealFreqSnapshotStorageKey(playerTag, yearMonthKey));
 }
 
-function saveVillageBuildingFreqBaseline(
+function saveVillageRealFreqSnapshot(
   freqRecord: Record<string, number>,
   playerTag?: string | null,
   yearMonthKey = getCurrentYearMonthKey()
 ): void {
-  const key = getVillageBuildingFreqStorageKey(playerTag, yearMonthKey);
+  const key = getVillageRealFreqSnapshotStorageKey(playerTag, yearMonthKey);
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(freqRecord));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function loadVillageLatestFreqSnapshot(
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): Record<string, number> | null {
+  return loadVillageWallCountsMap(getVillageLatestFreqStorageKey(playerTag, yearMonthKey));
+}
+
+function saveVillageLatestFreqSnapshot(
+  freqRecord: Record<string, number>,
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): void {
+  const key = getVillageLatestFreqStorageKey(playerTag, yearMonthKey);
   if (!key) return;
   try {
     localStorage.setItem(key, JSON.stringify(freqRecord));
@@ -958,84 +1001,131 @@ function saveVillageBuildingFreqBaseline(
 }
 
 /**
- * Universal Building & Trap Frequency Map Extractor:
- * Builds a `Map<"${id}_${lvl}", totalCount>` for all items in `buildings` and `traps`.
- * - For Walls (`1000010` or `1000033`) or grouped building entries with `cnt`, uses `item.cnt`.
- * - For standard individual building/trap entries, increments count by `1` per appearance.
+ * Auto-syncs the clean real frequency snapshot (`village_real_freq_snapshot_${YYYY_MM}_${TAG}`)
+ * from the already-saved `village_universal_latest_${YYYY_MM}_${TAG}` map (which was populated
+ * strictly from real village JSON imports) and purges the legacy fallback-corrupted key.
  */
-function extractBuildingsFrequencyMap(
-  source: RawCoCVillage | Record<string, number> | null | undefined
-): Map<string, number> {
-  const freqMap = new Map<string, number>();
-  if (!source || typeof source !== 'object') return freqMap;
+function ensureAccountRealFreqSnapshotAutoSynced(
+  playerTag?: string | null,
+  yearMonthKey = getCurrentYearMonthKey()
+): Record<string, number> | null {
+  const cleanedTag = playerTag?.trim().toUpperCase();
+  if (!cleanedTag) return null;
 
-  if (
-    ('buildings' in source && Array.isArray((source as RawCoCVillage).buildings)) ||
-    ('traps' in source && Array.isArray((source as RawCoCVillage).traps))
-  ) {
-    const village = source as RawCoCVillage;
-    const allBuildingItems: RawCoCItem[] = [
-      ...(Array.isArray(village.buildings) ? village.buildings : []),
-      ...(Array.isArray(village.traps) ? village.traps : []),
+  // Purge the legacy fallback-synthesized key so it never causes false diffs
+  const legacyCorruptedKey = getLegacyCorruptedFreqStorageKey(cleanedTag, yearMonthKey);
+  if (legacyCorruptedKey) {
+    try {
+      localStorage.removeItem(legacyCorruptedKey);
+    } catch {
+      // Ignore storage error
+    }
+  }
+
+  const existingRealSnapshot = loadVillageRealFreqSnapshot(cleanedTag, yearMonthKey);
+  if (existingRealSnapshot && Object.keys(existingRealSnapshot).length > 0) {
+    return existingRealSnapshot;
+  }
+
+  // Promote `village_universal_latest_${YYYY_MM}_${TAG}` (captured from the user's real JSON)
+  const latestRealSnapshot = loadVillageLatestFreqSnapshot(cleanedTag, yearMonthKey);
+  if (latestRealSnapshot && Object.keys(latestRealSnapshot).length > 0) {
+    saveVillageRealFreqSnapshot(latestRealSnapshot, cleanedTag, yearMonthKey);
+    return latestRealSnapshot;
+  }
+
+  return null;
+}
+
+/**
+ * Universal Frequency Map Extractor:
+ * Combines `buildings`, `traps`, `heroes`, `spells`, `troops` (or `units`), `pets`,
+ * `siege_machines`, and `helpers` from the JSON into ONE flat array.
+ * Builds a frequency map using `${item.data}_${item.lvl}` as the key and
+ * `item.cnt ? item.cnt : 1` as the count value.
+ */
+function extractUniversalFrequencyMap(
+  source: RawCoCVillage | Record<string, number> | null | undefined
+): Record<string, number> {
+  const map: Record<string, number> = {};
+  if (!source || typeof source !== 'object') return map;
+
+  const isRawVillage =
+    'buildings' in source ||
+    'traps' in source ||
+    'heroes' in source ||
+    'spells' in source ||
+    'troops' in source ||
+    'units' in source ||
+    'pets' in source ||
+    'siege_machines' in source;
+
+  if (isRawVillage) {
+    const v = source as RawCoCVillage;
+    const troopsArray = Array.isArray(v.troops)
+      ? v.troops
+      : Array.isArray(v.units)
+        ? v.units
+        : [];
+
+    const allItems: RawCoCItem[] = [
+      ...(Array.isArray(v.buildings) ? v.buildings : []),
+      ...(Array.isArray(v.traps) ? v.traps : []),
+      ...(Array.isArray(v.heroes) ? v.heroes : []),
+      ...(Array.isArray(v.spells) ? v.spells : []),
+      ...troopsArray,
+      ...(Array.isArray(v.pets) ? v.pets : []),
+      ...(Array.isArray(v.siege_machines) ? v.siege_machines : []),
+      ...(Array.isArray(v.helpers) ? v.helpers : []),
     ];
 
-    for (const item of allBuildingItems) {
+    for (const item of allItems) {
       if (!item) continue;
       const itemId = String(item.data ?? item.id ?? '').trim();
-      if (!itemId) continue;
       const lvl =
         typeof item.lvl === 'number' && Number.isFinite(item.lvl)
           ? Math.floor(item.lvl)
           : 0;
-      if (lvl <= 0) continue;
+      if (!itemId || lvl <= 0) continue;
 
-      const isWall = itemId === '1000010' || itemId === '1000033';
-      const count = isWall
-        ? typeof item.cnt === 'number' && Number.isFinite(item.cnt) && item.cnt > 0
-          ? Math.floor(item.cnt)
-          : 1
-        : typeof item.cnt === 'number' && Number.isFinite(item.cnt) && item.cnt > 0
+      const count =
+        typeof item.cnt === 'number' && Number.isFinite(item.cnt) && item.cnt > 0
           ? Math.floor(item.cnt)
           : 1;
-
       const key = `${itemId}_${lvl}`;
-      freqMap.set(key, (freqMap.get(key) || 0) + count);
+      map[key] = (map[key] || 0) + count;
     }
-    return freqMap;
+    return map;
   }
 
   for (const [key, cntVal] of Object.entries(source as Record<string, unknown>)) {
     const cnt =
       typeof cntVal === 'number' && Number.isFinite(cntVal) ? Math.floor(cntVal) : 0;
     if (key.includes('_') && cnt > 0) {
-      freqMap.set(key, (freqMap.get(key) || 0) + cnt);
+      map[key] = (map[key] || 0) + cnt;
     }
   }
-  return freqMap;
-}
-
-function buildingFreqMapToRecord(freqMap: Map<string, number>): Record<string, number> {
-  const record: Record<string, number> = {};
-  for (const [key, cnt] of freqMap.entries()) {
-    if (cnt > 0) {
-      record[key] = cnt;
-    }
-  }
-  return record;
+  return map;
 }
 
 /**
  * Extracts a snapshot map `{ [dataId]: currentLevel }` for all Village items
- * in the imported JSON.
+ * in the imported JSON (kept in sync for `hasVillageBaselineInStorage`).
  */
 function extractVillageLevelsFromJson(parsedData: RawCoCVillage): Record<string, number> {
+  const troopsArray = Array.isArray(parsedData.troops)
+    ? parsedData.troops
+    : Array.isArray(parsedData.units)
+      ? parsedData.units
+      : [];
+
   const allItems: RawCoCItem[] = [
     ...(Array.isArray(parsedData.buildings) ? parsedData.buildings : []),
     ...(Array.isArray(parsedData.traps) ? parsedData.traps : []),
     ...(Array.isArray(parsedData.heroes) ? parsedData.heroes : []),
     ...(Array.isArray(parsedData.pets) ? parsedData.pets : []),
     ...(Array.isArray(parsedData.spells) ? parsedData.spells : []),
-    ...(Array.isArray(parsedData.units) ? parsedData.units : []),
+    ...troopsArray,
     ...(Array.isArray(parsedData.siege_machines) ? parsedData.siege_machines : []),
     ...(Array.isArray(parsedData.helpers) ? parsedData.helpers : []),
   ];
@@ -1044,7 +1134,6 @@ function extractVillageLevelsFromJson(parsedData: RawCoCVillage): Record<string,
   for (const rawItem of allItems) {
     if (!rawItem) continue;
     const itemId = String(rawItem.data ?? rawItem.id ?? '').trim();
-    // Skip Walls (1000010 / 1000033); handled by Frequency-Map Diff Calculator
     if (!itemId || itemId === '1000010' || itemId === '1000033') continue;
     const itemLvl =
       typeof rawItem.lvl === 'number' && Number.isFinite(rawItem.lvl)
@@ -1058,73 +1147,332 @@ function extractVillageLevelsFromJson(parsedData: RawCoCVillage): Record<string,
   return snapshotLevels;
 }
 
-/**
- * Extracts single-instance non-building levels (Heroes, Pets, Laboratory Units/Spells/Siege, Helpers).
- */
-function extractNonBuildingLevelsFromJson(parsedData: RawCoCVillage): Record<string, number> {
-  const nonBuildingItems: RawCoCItem[] = [
-    ...(Array.isArray(parsedData.heroes) ? parsedData.heroes : []),
-    ...(Array.isArray(parsedData.pets) ? parsedData.pets : []),
-    ...(Array.isArray(parsedData.spells) ? parsedData.spells : []),
-    ...(Array.isArray(parsedData.units) ? parsedData.units : []),
-    ...(Array.isArray(parsedData.siege_machines) ? parsedData.siege_machines : []),
-    ...(Array.isArray(parsedData.helpers) ? parsedData.helpers : []),
-  ];
+function isSingleInstanceVillageItem(rawId: string): boolean {
+  return (
+    rawId.startsWith('28') || // Heroes
+    rawId.startsWith('73') || // Pets
+    rawId.startsWith('400') || // Troops & Siege Machines
+    rawId.startsWith('260') || // Spells
+    rawId.startsWith('93') || // Helpers / Apprentices
+    rawId === '1000001' || // Town Hall
+    rawId === '1000007' || // Laboratory
+    rawId === '1000014' || // Clan Castle
+    rawId === '1000020' || // Spell Factory
+    rawId === '1000059' || // Dark Spell Factory
+    rawId === '1000068' || // Pet House
+    rawId === '1000070' || // Blacksmith
+    rawId === '1000071' || // Hero Hall
+    rawId === '1000077' // Helper Hut
+  );
+}
 
-  const levels: Record<string, number> = {};
-  for (const rawItem of nonBuildingItems) {
-    if (!rawItem) continue;
-    const itemId = String(rawItem.data ?? rawItem.id ?? '').trim();
-    if (!itemId) continue;
-    const itemLvl =
-      typeof rawItem.lvl === 'number' && Number.isFinite(rawItem.lvl)
-        ? Math.floor(rawItem.lvl)
-        : 0;
-    if (itemLvl <= 0) continue;
-    if (levels[itemId] === undefined || itemLvl > levels[itemId]) {
-      levels[itemId] = itemLvl;
+/**
+ * Merges a newly detected upgrade transition (`startLevel -> targetLvl`, `addedCount`)
+ * into `nextUpgrades` without overwriting or losing previously saved upgrades in the month.
+ */
+function mergeSingleIncrementalUpgradeIntoHistory(
+  nextUpgrades: Record<string, VillageHistoryUpgradeEntry>,
+  rawId: string,
+  startLevel: number,
+  targetLvl: number,
+  addedCount: number,
+  todayShortLabel: string
+): void {
+  if (!rawId || rawId === '1000010' || rawId === '1000033') return;
+  if (targetLvl <= 1 || targetLvl <= startLevel || addedCount <= 0) return;
+
+  const resolvedName = resolveUpgradeName(rawId, `Item ${rawId}`);
+
+  // 1. Single-instance entities (Heroes, Pets, Lab Troops/Spells, TH, etc.):
+  //    Chain level transitions if an entry for this item already exists in the current month
+  if (isSingleInstanceVillageItem(rawId)) {
+    const existingEntryKey = Object.keys(nextUpgrades).find((k) => {
+      const entry = nextUpgrades[k];
+      const kBase = (entry?.rawId || k.split('_')[0] || k).trim();
+      return kBase === rawId;
+    });
+
+    if (existingEntryKey) {
+      const prev = nextUpgrades[existingEntryKey];
+      if (targetLvl > prev.currentLevel) {
+        nextUpgrades[existingEntryKey] = {
+          rawId,
+          name: resolvedName,
+          startLevel: Math.min(prev.startLevel, startLevel),
+          currentLevel: targetLvl,
+          count: 1,
+          completedDate: todayShortLabel,
+        };
+      }
+      return;
+    }
+
+    const targetKey = `${rawId}_${targetLvl}`;
+    nextUpgrades[targetKey] = {
+      rawId,
+      name: resolvedName,
+      startLevel,
+      currentLevel: targetLvl,
+      count: 1,
+      completedDate: todayShortLabel,
+    };
+    return;
+  }
+
+  // 2. Multi-instance Buildings & Traps (e.g. Wizard Towers, Inferno Towers, X-Bows, Air Defenses):
+  //    Accumulate counts per `${rawId}_${targetLvl}` transition
+  const targetKey = `${rawId}_${targetLvl}`;
+  const legacySameLevelKey =
+    nextUpgrades[rawId] && nextUpgrades[rawId].currentLevel === targetLvl ? rawId : null;
+  const activeKey = nextUpgrades[targetKey] ? targetKey : legacySameLevelKey;
+
+  if (activeKey && nextUpgrades[activeKey]) {
+    const prev = nextUpgrades[activeKey];
+    const prevCount = typeof prev.count === 'number' && prev.count > 1 ? Math.floor(prev.count) : 1;
+    nextUpgrades[targetKey] = {
+      rawId,
+      name: resolvedName,
+      startLevel: Math.min(prev.startLevel, startLevel),
+      currentLevel: targetLvl,
+      count: prevCount + addedCount,
+      completedDate: todayShortLabel,
+    };
+    if (activeKey !== targetKey) {
+      delete nextUpgrades[activeKey];
+    }
+    return;
+  }
+
+  nextUpgrades[targetKey] = {
+    rawId,
+    name: resolvedName,
+    startLevel,
+    currentLevel: targetLvl,
+    count: addedCount,
+    completedDate: todayShortLabel,
+  };
+}
+
+/**
+ * Incremental Real-Snapshot Diff Engine:
+ * Compares `newMap` against `prevRealSnapshot` (both real `${item.data}_${item.lvl}` frequency maps)
+ * and accumulates all positive level increases into `existingUpgrades` and `existingWalls`.
+ */
+function accumulateIncrementalDiffFromRealSnapshot(
+  prevRealSnapshot: Record<string, number>,
+  newMap: Record<string, number>,
+  existingUpgrades: Record<string, VillageHistoryUpgradeEntry>,
+  existingWalls: Record<string, VillageWallHistoryEntry>,
+  todayShortLabel: string
+): {
+  upgrades: Record<string, VillageHistoryUpgradeEntry>;
+  walls: Record<string, VillageWallHistoryEntry>;
+} {
+  const nextUpgrades: Record<string, VillageHistoryUpgradeEntry> = { ...existingUpgrades };
+  const nextWalls: Record<string, VillageWallHistoryEntry> = { ...existingWalls };
+
+  // Index previous real snapshot levels by item ID so multi-level jumps resolve exact startLevel
+  const prevLevelsById: Record<string, number[]> = {};
+  for (const [prevKey, prevCnt] of Object.entries(prevRealSnapshot)) {
+    if (prevCnt <= 0) continue;
+    const [id, lvlStr] = prevKey.split('_');
+    const lvl = parseInt(lvlStr, 10);
+    if (!id || !Number.isFinite(lvl) || lvl <= 0) continue;
+    if (!prevLevelsById[id]) prevLevelsById[id] = [];
+    prevLevelsById[id].push(lvl);
+  }
+
+  for (const [key, newCount] of Object.entries(newMap)) {
+    const [id, lvlStr] = key.split('_');
+    const targetLvl = parseInt(lvlStr, 10);
+    if (!id || !Number.isFinite(targetLvl) || targetLvl <= 1) continue;
+    if (id === '1000033') continue; // Skip Builder Base Wall
+
+    const prevCount = prevRealSnapshot[key] || 0;
+    if (newCount > prevCount) {
+      const addedCount = newCount - prevCount;
+
+      // Home Village Wall (1000010)
+      if (id === '1000010') {
+        const lvlKey = String(targetLvl);
+        const previouslyLogged = nextWalls[lvlKey]?.upgradedCount || 0;
+        nextWalls[lvlKey] = {
+          fromLevel: targetLvl - 1,
+          lvl: targetLvl,
+          upgradedCount: previouslyLogged + addedCount,
+        };
+        continue;
+      }
+
+      // Resolve exact startLevel from the level in prevRealSnapshot whose count decreased
+      let startLevel = targetLvl - 1;
+      const candidatePrevLevels = (prevLevelsById[id] || [])
+        .filter(
+          (l) =>
+            l < targetLvl &&
+            (prevRealSnapshot[`${id}_${l}`] || 0) > (newMap[`${id}_${l}`] || 0)
+        )
+        .sort((a, b) => b - a);
+      if (candidatePrevLevels.length > 0) {
+        startLevel = candidatePrevLevels[0];
+      }
+
+      mergeSingleIncrementalUpgradeIntoHistory(
+        nextUpgrades,
+        id,
+        startLevel,
+        targetLvl,
+        addedCount,
+        todayShortLabel
+      );
     }
   }
-  return levels;
+
+  return { upgrades: nextUpgrades, walls: nextWalls };
+}
+
+/**
+ * Fallback completion detector for accounts that had not yet saved a `village_real_freq_snapshot`
+ * prior to importing: inspects active builder/lab/pet upgrade timers stored in `previousProfileData`
+ * plus single-instance items in `existingBaseline` without ever synthesizing fake multi-building counts.
+ */
+function accumulateCompletedTimersWithoutRealSnapshot(
+  parsedData: RawCoCVillage,
+  newMap: Record<string, number>,
+  importedLevels: Record<string, number>,
+  existingBaseline: Record<string, number> | null,
+  previousProfileData: SavedState | null | undefined,
+  existingUpgrades: Record<string, VillageHistoryUpgradeEntry>,
+  todayShortLabel: string
+): Record<string, VillageHistoryUpgradeEntry> {
+  const nextUpgrades: Record<string, VillageHistoryUpgradeEntry> = { ...existingUpgrades };
+
+  // 1. Check active timers that were running in `previousProfileData` (builders, lab, goblinLab, pet)
+  if (previousProfileData) {
+    const prevTimers: BuilderTime[] = [
+      ...(Array.isArray(previousProfileData.builders) ? previousProfileData.builders : []),
+      ...(previousProfileData.labTimer ? [previousProfileData.labTimer] : []),
+      ...(previousProfileData.goblinLabTimer ? [previousProfileData.goblinLabTimer] : []),
+      ...(previousProfileData.petTimer ? [previousProfileData.petTimer] : []),
+    ];
+
+    const prevActiveByKey: Record<string, { rawId: string; startLvl: number; count: number }> = {};
+    for (const t of prevTimers) {
+      if (!t || !t.rawId || typeof t.upgradeLevel !== 'number' || t.upgradeLevel <= 0) continue;
+      const totalSec = getTimerTotalSeconds(t);
+      if (totalSec <= 0) continue;
+      const rawId = t.rawId.trim();
+      const startLvl = Math.floor(t.upgradeLevel);
+      const key = `${rawId}_${startLvl}`;
+      if (!prevActiveByKey[key]) {
+        prevActiveByKey[key] = { rawId, startLvl, count: 0 };
+      }
+      prevActiveByKey[key].count += 1;
+    }
+
+    // Count how many items at `${rawId}_${startLvl}` STILL have `timer > 0` in the newly imported JSON
+    const troopsArray = Array.isArray(parsedData.troops)
+      ? parsedData.troops
+      : Array.isArray(parsedData.units)
+        ? parsedData.units
+        : [];
+    const allRawItems: RawCoCItem[] = [
+      ...(Array.isArray(parsedData.buildings) ? parsedData.buildings : []),
+      ...(Array.isArray(parsedData.traps) ? parsedData.traps : []),
+      ...(Array.isArray(parsedData.heroes) ? parsedData.heroes : []),
+      ...troopsArray,
+      ...(Array.isArray(parsedData.spells) ? parsedData.spells : []),
+      ...(Array.isArray(parsedData.siege_machines) ? parsedData.siege_machines : []),
+      ...(Array.isArray(parsedData.pets) ? parsedData.pets : []),
+    ];
+
+    const stillRunningByKey: Record<string, number> = {};
+    for (const item of allRawItems) {
+      if (!item || typeof item.timer !== 'number' || item.timer <= 0) continue;
+      const rawId = String(item.data ?? item.id ?? '').trim();
+      const lvl = typeof item.lvl === 'number' ? Math.floor(item.lvl) : 0;
+      if (!rawId || lvl <= 0) continue;
+      const count = typeof item.cnt === 'number' && item.cnt > 0 ? Math.floor(item.cnt) : 1;
+      const key = `${rawId}_${lvl}`;
+      stillRunningByKey[key] = (stillRunningByKey[key] || 0) + count;
+    }
+
+    for (const [key, info] of Object.entries(prevActiveByKey)) {
+      const stillRunning = stillRunningByKey[key] || 0;
+      if (info.count > stillRunning) {
+        const finishedCount = info.count - stillRunning;
+        const targetLvl = info.startLvl + 1;
+        const availableAtTarget = newMap[`${info.rawId}_${targetLvl}`] || 0;
+        const confirmedCount = Math.min(finishedCount, availableAtTarget);
+        if (confirmedCount > 0) {
+          mergeSingleIncrementalUpgradeIntoHistory(
+            nextUpgrades,
+            info.rawId,
+            info.startLvl,
+            targetLvl,
+            confirmedCount,
+            todayShortLabel
+          );
+        }
+      }
+    }
+  }
+
+  // 2. Check single-instance items (Heroes, Pets, Troops, Spells, Helpers, TH) against existingBaseline
+  if (existingBaseline) {
+    for (const [id, newLvl] of Object.entries(importedLevels)) {
+      if (!isSingleInstanceVillageItem(id)) continue;
+      const baseLvl = existingBaseline[id];
+      if (typeof baseLvl === 'number' && baseLvl > 0 && newLvl > baseLvl) {
+        mergeSingleIncrementalUpgradeIntoHistory(
+          nextUpgrades,
+          id,
+          baseLvl,
+          newLvl,
+          1,
+          todayShortLabel
+        );
+      }
+    }
+  }
+
+  return nextUpgrades;
 }
 
 /**
  * Handles the Monthly Baseline & History comparison on JSON import:
- * 1. Checks if `village_baseline_${YYYY_MM}_${PLAYER_TAG}` exists in localStorage.
- * 2. IF IT DOES NOT EXIST (First import of the month):
- *    - Saves all current JSON levels directly into `village_baseline_${YYYY_MM}_${PLAYER_TAG}`.
- *    - Saves the initial `${item.data}_${item.lvl}` frequency map into `village_building_freq_${YYYY_MM}_${PLAYER_TAG}`.
- *    - Saves the initial Wall `Map<Level, Count>` into `village_wall_baseline_${YYYY_MM}_${PLAYER_TAG}`.
- *    - Does NOT register any items as completed upgrades in `village_history` (`upgrades: {}, walls: {}`).
- * 3. IF THE BASELINE ALREADY EXISTS (Subsequent imports):
- *    - Compares Heroes, Pets, and Lab items against `village_baseline_${YYYY_MM}_${PLAYER_TAG}`.
- *    - Runs the Universal Building & Wall Frequency-Map Diff Calculator (`${item.data}_${item.lvl}`)
- *      comparing the OLD saved frequency map against the NEWly imported JSON frequency map:
- *      if `newCount > oldCount` for any `${id}_${lvl}` (`lvl > 1`), logs `newCount - oldCount`
- *      upgrades to that level so duplicate defenses (e.g., multiple Wizard Towers or Inferno Towers)
- *      are never overwritten or missed.
+ * - Auto-syncs `village_real_freq_snapshot_${YYYY_MM}_${TAG}` from `village_universal_latest` if present.
+ * - Preserves all existing saved upgrades in `village_history_${YYYY_MM}_${TAG}`.
+ * - Compares the newly imported JSON (`newMap`) against `prevRealSnapshot` (or active timers if no
+ *   real snapshot existed yet) and accumulates all newly completed upgrades & walls in sync for both
+ *   Village Monthly Progress and 5-Month Upgrade History & Stats.
  */
 function syncMonthlyBaselineAndHistoryOnImport(
   parsedData: RawCoCVillage,
   playerTag?: string | null,
-  yearMonthKey = getCurrentYearMonthKey()
+  yearMonthKey = getCurrentYearMonthKey(),
+  previousProfileData?: SavedState | null
 ): VillageMonthlyHistory {
   const importedLevels = extractVillageLevelsFromJson(parsedData);
-  const nonBuildingLevels = extractNonBuildingLevelsFromJson(parsedData);
-  const newBuildingFreqMap = extractBuildingsFrequencyMap(parsedData);
-  const newBuildingFreqRecord = buildingFreqMapToRecord(newBuildingFreqMap);
+  const newMap = extractUniversalFrequencyMap(parsedData);
   const newWallRecord = wallLevelMapToRecord(extractWallLevelMap(parsedData));
 
+  // Ensure any existing `village_universal_latest` from today's village is promoted to `village_real_freq_snapshot`
+  const prevRealSnapshot = ensureAccountRealFreqSnapshotAutoSynced(playerTag, yearMonthKey);
   const existingBaseline = loadVillageBaselineLevels(playerTag, yearMonthKey);
-  const oldBuildingFreqRecord = loadVillageBuildingFreqBaseline(playerTag, yearMonthKey);
   const oldWallRecord = loadVillageWallBaseline(playerTag, yearMonthKey);
   const currentHistory = loadVillageMonthlyHistory(playerTag, yearMonthKey);
 
-  // 1. FIRST IMPORT OF THE MONTH (NO BASELINE EXISTS YET)
-  if (!existingBaseline) {
+  const hasExistingSavedHistory =
+    Object.keys(currentHistory.upgrades).length > 0 ||
+    Object.keys(currentHistory.walls || {}).length > 0;
+
+  // 1. FIRST IMPORT OF A BRAND-NEW MONTH (no baseline, no snapshot, and no saved history yet)
+  if (!existingBaseline && !prevRealSnapshot && !hasExistingSavedHistory) {
     saveVillageBaselineLevels(importedLevels, playerTag, yearMonthKey);
-    if (Object.keys(newBuildingFreqRecord).length > 0) {
-      saveVillageBuildingFreqBaseline(newBuildingFreqRecord, playerTag, yearMonthKey);
+    if (Object.keys(newMap).length > 0) {
+      saveVillageRealFreqSnapshot(newMap, playerTag, yearMonthKey);
+      saveVillageLatestFreqSnapshot(newMap, playerTag, yearMonthKey);
     }
     if (Object.keys(newWallRecord).length > 0) {
       saveVillageWallBaseline(newWallRecord, playerTag, yearMonthKey);
@@ -1137,150 +1485,62 @@ function syncMonthlyBaselineAndHistoryOnImport(
         builderBite: { ...(currentHistory.potions.builderBite || { used: 0, timeSavedMinutes: 0 }) },
         studySoup: { ...(currentHistory.potions.studySoup || { used: 0, timeSavedMinutes: 0 }) },
       },
-      upgrades: {}, // Strictly empty on first baseline snapshot import
+      upgrades: {},
       walls: {},
     };
     saveVillageMonthlyHistory(initialHistory, playerTag, yearMonthKey);
     return initialHistory;
   }
 
-  // 2. SUBSEQUENT IMPORTS (BASELINE ALREADY EXISTS)
-  const nextUpgrades: Record<string, VillageHistoryUpgradeEntry> = {
-    ...currentHistory.upgrades,
-  };
-  delete nextUpgrades['1000010'];
-  delete nextUpgrades['1000033'];
-
-  let baselineUpdatedWithNewUnlocks = false;
+  // 2. SUBSEQUENT IMPORTS IN ACTIVE MONTH: Accumulate newly completed upgrades onto saved history
   const todayShortLabel = new Date().toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
   });
 
-  // 2A. Compare single-instance non-building items (Heroes, Pets, Lab Troops/Spells/Sieges, Helpers)
-  for (const [itemId, newLevel] of Object.entries(nonBuildingLevels)) {
-    const baselineLevel = existingBaseline[itemId];
+  let nextUpgrades: Record<string, VillageHistoryUpgradeEntry> = { ...currentHistory.upgrades };
+  let nextWalls: Record<string, VillageWallHistoryEntry> = { ...(currentHistory.walls || {}) };
 
-    if (typeof baselineLevel === 'number') {
-      if (newLevel > baselineLevel) {
-        nextUpgrades[itemId] = {
-          rawId: itemId,
-          name: resolveUpgradeName(itemId, `Item ${itemId}`),
-          startLevel: baselineLevel,
-          currentLevel: newLevel,
-          count: 1,
-          completedDate:
-            currentHistory.upgrades[itemId]?.completedDate || todayShortLabel,
-        };
-      }
-    } else {
-      existingBaseline[itemId] = newLevel;
-      baselineUpdatedWithNewUnlocks = true;
-    }
-  }
-
-  // 2B. Universal Frequency-Map Diff Calculator for ALL Buildings & Traps (and Walls)
-  let nextWalls: Record<string, VillageWallHistoryEntry> = {
-    ...(currentHistory.walls || {}),
-  };
-
-  if (oldBuildingFreqRecord) {
-    const oldFreqMap = extractBuildingsFrequencyMap(oldBuildingFreqRecord);
-
-    for (const [key, newCount] of newBuildingFreqMap.entries()) {
-      const [id, lvlStr] = key.split('_');
-      const targetLvl = parseInt(lvlStr, 10);
-      if (!id || !Number.isFinite(targetLvl) || targetLvl <= 1) continue;
-
-      const oldCount = oldFreqMap.get(key) || 0;
-      if (newCount > oldCount) {
-        const upgradedAmount = newCount - oldCount;
-
-        // Home Village Wall (1000010) -> store in `nextWalls`
-        if (id === '1000010') {
-          const lvlKey = String(targetLvl);
-          const prevWallCount = nextWalls[lvlKey]?.upgradedCount ?? 0;
-          nextWalls[lvlKey] = {
-            fromLevel: targetLvl - 1,
-            lvl: targetLvl,
-            upgradedCount: prevWallCount + upgradedAmount,
-          };
-          continue;
-        }
-        if (id === '1000033') continue;
-
-        // Standard Defense / Resource Building / Trap -> store in `nextUpgrades["${id}_${targetLvl}"]`
-        const upgKey = `${id}_${targetLvl}`;
-        const legacyEntry = nextUpgrades[id];
-        const existingEntry = nextUpgrades[upgKey];
-        const prevCount = existingEntry
-          ? existingEntry.count ?? 1
-          : legacyEntry && legacyEntry.currentLevel === targetLvl
-            ? legacyEntry.count ?? 1
-            : 0;
-
-        if (legacyEntry && legacyEntry.currentLevel === targetLvl) {
-          delete nextUpgrades[id];
-        }
-
-        nextUpgrades[upgKey] = {
-          rawId: id,
-          name: resolveUpgradeName(id, `Item ${id}`),
-          startLevel: targetLvl - 1,
-          currentLevel: targetLvl,
-          count: prevCount + upgradedAmount,
-          completedDate:
-            existingEntry?.completedDate ||
-            legacyEntry?.completedDate ||
-            todayShortLabel,
-        };
-      }
-    }
+  if (prevRealSnapshot && Object.keys(prevRealSnapshot).length > 0) {
+    const accumulated = accumulateIncrementalDiffFromRealSnapshot(
+      prevRealSnapshot,
+      newMap,
+      nextUpgrades,
+      nextWalls,
+      todayShortLabel
+    );
+    nextUpgrades = accumulated.upgrades;
+    nextWalls = accumulated.walls;
   } else {
-    // Mid-month migration when `existingBaseline` exists from an older version before `village_building_freq` was saved:
-    // Recover any multi-instance buildings whose current level in `newBuildingFreqMap` exceeds `existingBaseline[id]`
-    for (const [key, newCount] of newBuildingFreqMap.entries()) {
-      const [id, lvlStr] = key.split('_');
-      const targetLvl = parseInt(lvlStr, 10);
-      if (!id || id === '1000010' || id === '1000033' || !Number.isFinite(targetLvl) || targetLvl <= 1) {
-        continue;
-      }
-      const baselineLevel = existingBaseline[id];
-      if (typeof baselineLevel === 'number' && targetLvl > baselineLevel) {
-        const upgKey = `${id}_${targetLvl}`;
-        const legacyEntry = nextUpgrades[id];
-        const existingEntry = nextUpgrades[upgKey];
-        if (legacyEntry) {
-          delete nextUpgrades[id];
-        }
-        nextUpgrades[upgKey] = {
-          rawId: id,
-          name: resolveUpgradeName(id, `Item ${id}`),
-          startLevel: targetLvl - 1,
-          currentLevel: targetLvl,
-          count: Math.max(existingEntry?.count ?? 0, newCount),
-          completedDate:
-            existingEntry?.completedDate ||
-            legacyEntry?.completedDate ||
-            todayShortLabel,
-        };
-      } else if (baselineLevel === undefined) {
-        existingBaseline[id] = targetLvl;
-        baselineUpdatedWithNewUnlocks = true;
-      }
-    }
-
-    if (Object.keys(newWallRecord).length > 0 && oldWallRecord) {
+    // No prior real frequency snapshot for this account yet: capture completed active timers & walls safely
+    nextUpgrades = accumulateCompletedTimersWithoutRealSnapshot(
+      parsedData,
+      newMap,
+      importedLevels,
+      existingBaseline,
+      previousProfileData,
+      nextUpgrades,
+      todayShortLabel
+    );
+    if (oldWallRecord) {
       nextWalls = calculateMultiLevelWallDiffs(oldWallRecord, parsedData, nextWalls);
     }
   }
 
-  // Persist updated baselines for next import comparison
-  if (baselineUpdatedWithNewUnlocks) {
-    saveVillageBaselineLevels(existingBaseline, playerTag, yearMonthKey);
+  delete nextUpgrades['1000010'];
+  delete nextUpgrades['1000033'];
+
+  // Update the reference snapshot & baselines to the newly imported village state for future imports
+  if (Object.keys(importedLevels).length > 0) {
+    saveVillageBaselineLevels(
+      existingBaseline ? { ...existingBaseline, ...importedLevels } : importedLevels,
+      playerTag,
+      yearMonthKey
+    );
   }
-  if (Object.keys(newBuildingFreqRecord).length > 0) {
-    saveVillageBuildingFreqBaseline(newBuildingFreqRecord, playerTag, yearMonthKey);
+  if (Object.keys(newMap).length > 0) {
+    saveVillageRealFreqSnapshot(newMap, playerTag, yearMonthKey);
+    saveVillageLatestFreqSnapshot(newMap, playerTag, yearMonthKey);
   }
   if (Object.keys(newWallRecord).length > 0) {
     saveVillageWallBaseline(newWallRecord, playerTag, yearMonthKey);
@@ -4877,10 +5137,17 @@ export default function App() {
   const activeYearMonthKey = getCurrentYearMonthKey(new Date(nowTick));
 
   // Automatically load isolated monthly stats & village_history_${YYYY_MM}_${activePlayerTag}
-  // when switching accounts, locking a tag, opening the modal, or rolling into a new calendar month
+  // and immediately auto-sync the real village frequency snapshot across all saved accounts
   useEffect(() => {
+    for (const acc of accounts) {
+      const accTag = (acc?.tag || '').trim().toUpperCase();
+      if (accTag) {
+        ensureAccountRealFreqSnapshotAutoSynced(accTag, activeYearMonthKey);
+      }
+    }
     const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
     const currentTag = (currentAccount?.tag || '').trim().toUpperCase();
+    ensureAccountRealFreqSnapshotAutoSynced(currentTag, activeYearMonthKey);
     const loadedHistory = loadVillageMonthlyHistory(currentTag, activeYearMonthKey);
     setMonthlyHistory(loadedHistory);
     setMonthlyStats({
@@ -7225,9 +7492,14 @@ export default function App() {
       (item) => item && typeof item.timer === 'number' && item.timer > 0
     );
 
-    // 2. Scan Laboratory arrays: units, spells, siege_machines
+    // 2. Scan Laboratory arrays: troops/units, spells, siege_machines
+    const labTroopsList = Array.isArray(parsedData.troops)
+      ? parsedData.troops
+      : Array.isArray(parsedData.units)
+        ? parsedData.units
+        : [];
     const labItems: RawCoCItem[] = [
-      ...(Array.isArray(parsedData.units) ? parsedData.units : []),
+      ...labTroopsList,
       ...(Array.isArray(parsedData.spells) ? parsedData.spells : []),
       ...(Array.isArray(parsedData.siege_machines) ? parsedData.siege_machines : []),
     ];
@@ -7243,6 +7515,9 @@ export default function App() {
     );
 
     if (
+      homeItems.length === 0 &&
+      labItems.length === 0 &&
+      petItems.length === 0 &&
       activeBuilderUpgrades.length === 0 &&
       activeLabUpgrades.length === 0 &&
       activePetUpgrades.length === 0 &&
@@ -7883,7 +8158,8 @@ export default function App() {
     const updatedHistoryObj = syncMonthlyBaselineAndHistoryOnImport(
       parsedData,
       resolvedImportPlayerTag,
-      currentMonthKey
+      currentMonthKey,
+      existingActiveProfileBeforeImport?.data
     );
     setMonthlyHistory(updatedHistoryObj);
     setMonthlyStats({
@@ -10770,7 +11046,14 @@ export default function App() {
           ? loadVillageMonthlyHistory(activeModalPlayerTag, activeYearMonthKey)
           : createEmptyVillageMonthlyHistory();
         const completedUpgradesEntries = Object.entries(activeModalHistory.upgrades).filter(
-          ([, u]) => u.currentLevel > u.startLevel
+          ([entryKey, u]) => {
+            const baseItemId = (u.rawId || entryKey.split('_')[0] || entryKey).trim();
+            return (
+              u.currentLevel > u.startLevel &&
+              baseItemId !== '1000010' &&
+              baseItemId !== '1000033'
+            );
+          }
         );
 
         /**
