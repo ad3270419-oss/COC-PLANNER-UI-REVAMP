@@ -14,7 +14,9 @@ import {
 import {
   ClashWrappedInfographicCard,
   FiveMonthUpgradeHistory,
+  WrappedImageSaveModal,
   triggerClashWrappedImageExport,
+  type GeneratedWrappedImagePayload,
   type MonthUpgradeHistoryData,
   type PotionHistoryBreakdownItem,
   type StandardUpgradeHistoryItem,
@@ -260,6 +262,9 @@ declare global {
   interface Window {
     ClashWidgetBridge?: {
       syncVillages: (villagesJson: string, activeIndex: number) => void;
+      hasStoragePermission?: () => boolean;
+      requestStoragePermission?: () => void;
+      saveImageToGallery?: (base64Png: string, fileName: string) => boolean;
     };
   }
 }
@@ -4600,11 +4605,14 @@ export default function App() {
   >(null);
   const [isFiveMonthArchiveOpen, setIsFiveMonthArchiveOpen] = useState<boolean>(false);
   const [isExportingWrappedModal, setIsExportingWrappedModal] = useState<boolean>(false);
+  const [modalWrappedSavePayload, setModalWrappedSavePayload] =
+    useState<GeneratedWrappedImagePayload | null>(null);
   const modalWrappedCardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (summaryModalSection === null) {
       setIsFiveMonthArchiveOpen(false);
+      setModalWrappedSavePayload(null);
     }
   }, [summaryModalSection]);
 
@@ -10710,12 +10718,21 @@ export default function App() {
           triggerHaptic(15);
           setIsExportingWrappedModal(true);
           try {
-            await triggerClashWrappedImageExport({
+            const payload = await triggerClashWrappedImageExport({
               cardElement: modalWrappedCardRef.current,
               accountName: activeAccountProfile.name,
               playerTag: activeModalPlayerTag,
               monthData: currentMonthWrappedData,
             });
+            if (payload) {
+              setModalWrappedSavePayload(payload);
+              showToast(
+                'success',
+                payload.savedViaNativeBridge
+                  ? `Saved to Gallery: Pictures/ClashPlanner/${payload.fileName}`
+                  : `Generated ${payload.fileName} for on-device save`
+              );
+            }
           } finally {
             setIsExportingWrappedModal(false);
           }
@@ -10805,6 +10822,12 @@ export default function App() {
                       playerTag={activeModalPlayerTag}
                       townHallLevel={resolvedThLevel}
                       monthData={currentMonthWrappedData}
+                    />
+
+                    {/* On-Device Save & Share Modal for Installed APK / PWA */}
+                    <WrappedImageSaveModal
+                      payload={modalWrappedSavePayload}
+                      onClose={() => setModalWrappedSavePayload(null)}
                     />
 
                     {/* Option to open 5-Month Upgrade History & Stats tab */}

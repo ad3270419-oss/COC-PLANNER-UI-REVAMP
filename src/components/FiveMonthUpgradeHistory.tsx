@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import html2canvas from 'html2canvas';
 import { getTownHallIconSrc, resolveUpgradeIconSources } from '../cocAssets';
 
 export type HistoryCategoryKey =
@@ -67,12 +68,26 @@ export interface FiveMonthUpgradeHistoryProps {
   onBackToSummary?: () => void;
 }
 
+export interface GeneratedWrappedImagePayload {
+  dataUrl: string;
+  blob: Blob;
+  file: File;
+  fileName: string;
+  savedViaNativeBridge: boolean;
+}
+
 declare global {
   interface Window {
     html2canvas?: (
       element: HTMLElement,
       options?: Record<string, unknown>
     ) => Promise<HTMLCanvasElement>;
+    ClashWidgetBridge?: {
+      syncVillages: (villagesJson: string, activeIndex: number) => void;
+      hasStoragePermission?: () => boolean;
+      requestStoragePermission?: () => void;
+      saveImageToGallery?: (base64Png: string, fileName: string) => boolean;
+    };
   }
 }
 
@@ -140,41 +155,74 @@ function buildLastFiveMonthsList(nowMs: number): Array<{ monthKey: string; month
 }
 
 /**
- * Dynamically injects html2canvas CDN script if not already present on `window`.
+ * Returns bundled html2canvas (or window.html2canvas fallback) so offline APK & PWA builds
+ * never require a network connection to generate the PNG.
  */
 export async function ensureHtml2CanvasLoaded(): Promise<
   ((element: HTMLElement, options?: Record<string, unknown>) => Promise<HTMLCanvasElement>) | null
 > {
-  if (typeof window === 'undefined') return null;
-  if (typeof window.html2canvas === 'function') {
+  if (typeof html2canvas === 'function') {
+    return html2canvas as unknown as (
+      element: HTMLElement,
+      options?: Record<string, unknown>
+    ) => Promise<HTMLCanvasElement>;
+  }
+  if (typeof window !== 'undefined' && typeof window.html2canvas === 'function') {
     return window.html2canvas;
   }
+  return null;
+}
 
-  return new Promise((resolve) => {
-    const existingScript = document.getElementById(
-      'html2canvas-cdn-script'
-    ) as HTMLScriptElement | null;
-    if (existingScript) {
-      existingScript.addEventListener('load', () => resolve(window.html2canvas || null), {
-        once: true,
-      });
-      existingScript.addEventListener('error', () => resolve(null), { once: true });
-      return;
-    }
+/**
+ * Converts all <img> elements inside `container` to inline base64 `data:` URLs prior to
+ * running html2canvas so Android WebViews and installed PWAs never taint the canvas.
+ */
+async function inlineAllImagesInContainer(container: HTMLElement): Promise<void> {
+  const imgNodes = Array.from(container.querySelectorAll('img'));
+  await Promise.all(
+    imgNodes.map(async (img) => {
+      const currentSrc = img.getAttribute('src') || img.src;
+      if (!currentSrc || currentSrc.startsWith('data:')) return;
+      try {
+        const res = await fetch(img.src);
+        if (!res.ok) return;
+        const blob = await res.blob();
+        const dataUrl = await new Promise<string | null>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () =>
+            resolve(typeof reader.result === 'string' ? reader.result : null);
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(blob);
+        });
+        if (dataUrl) {
+          img.src = dataUrl;
+          if (typeof img.decode === 'function') {
+            await img.decode().catch(() => {});
+          }
+        }
+      } catch {
+        // Ignore individual icon fetch errors; fallback canvas drawing still works
+      }
+    })
+  );
+}
 
-    const script = document.createElement('script');
-    script.id = 'html2canvas-cdn-script';
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
-    script.async = true;
-    script.onload = () => resolve(window.html2canvas || null);
-    script.onerror = () => resolve(null);
-    document.head.appendChild(script);
-  });
+function dataUrlToBlob(dataUrl: string): Blob {
+  const parts = dataUrl.split(',');
+  const mimeMatch = parts[0]?.match(/:(.*?);/);
+  const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+  const binaryStr = atob(parts[1] || '');
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
 }
 
 /**
  * Pure offline 2D Canvas fallback generator
- * in case the device has no internet connection and html2canvas CDN is not cached.
+ * in case html2canvas fails for any reason.
  * Strictly renders ONLY UPGRADES (no potions, no magic snacks, no time saved).
  */
 function renderOfflineFallbackWrappedCanvas(
@@ -276,12 +324,62 @@ function renderOfflineFallbackWrappedCanvas(
   return canvas;
 }
 
+/**
+ * Triggers direct on-device save:
+ * 1) If running inside the installed Android APK (`window.ClashWidgetBridge.saveImageToGallery`),
+ *    requests Android storage permission if needed and writes directly to `Pictures/ClashPlanner`.
+ * 2) Triggers browser / PWA file download via `<a download>`.
+ */
+export function saveGeneratedImageToDevice(payload: GeneratedWrappedImagePayload): boolean {
+  const { dataUrl, blob, fileName } = payload;
+
+  // 1. Native Android APK Bridge (MediaStore + runtime storage permission)
+  if (
+    typeof window !== 'undefined' &&
+    window.ClashWidgetBridge &&
+    typeof window.ClashWidgetBridge.saveImageToGallery === 'function'
+  ) {
+    try {
+      const ok = window.ClashWidgetBridge.saveImageToGallery(dataUrl, fileName);
+      if (ok) return true;
+    } catch {
+      // Fall through to standard download
+    }
+  }
+
+  // 2. Standard Browser & PWA Download
+  try {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 6000);
+    return true;
+  } catch {
+    try {
+      const fallbackLink = document.createElement('a');
+      fallbackLink.href = dataUrl;
+      fallbackLink.download = fileName;
+      document.body.appendChild(fallbackLink);
+      fallbackLink.click();
+      document.body.removeChild(fallbackLink);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 export async function triggerClashWrappedImageExport(params: {
   cardElement: HTMLElement | null;
   accountName: string;
   playerTag?: string;
   monthData: MonthUpgradeHistoryData;
-}): Promise<boolean> {
+}): Promise<GeneratedWrappedImagePayload | null> {
   const { cardElement, accountName, playerTag, monthData } = params;
   let canvas: HTMLCanvasElement | null = null;
 
@@ -289,11 +387,12 @@ export async function triggerClashWrappedImageExport(params: {
     const html2canvasFn = await ensureHtml2CanvasLoaded();
     if (html2canvasFn) {
       try {
+        await inlineAllImagesInContainer(cardElement);
         canvas = await html2canvasFn(cardElement, {
           backgroundColor: '#0B0E14',
           scale: 3,
           useCORS: true,
-          allowTaint: true,
+          allowTaint: false,
           logging: false,
           scrollX: 0,
           scrollY: 0,
@@ -316,48 +415,183 @@ export async function triggerClashWrappedImageExport(params: {
   const safeMonth = monthData.monthLabel.replace(/\s+/g, '_');
   const fileName = `Clash_Wrapped_${safeAccount}_${safeMonth}.png`;
 
-  return new Promise((resolve) => {
-    canvas!.toBlob((blob) => {
-      if (!blob) {
-        resolve(false);
-        return;
-      }
+  let dataUrl = '';
+  try {
+    dataUrl = canvas.toDataURL('image/png');
+  } catch {
+    const fallbackCanvas = renderOfflineFallbackWrappedCanvas(accountName, playerTag, monthData);
+    dataUrl = fallbackCanvas.toDataURL('image/png');
+  }
 
-      const file = new File([blob], fileName, { type: 'image/png' });
-      const nav = navigator as Navigator & {
-        canShare?: (data?: ShareData) => boolean;
-      };
+  const blob = dataUrlToBlob(dataUrl);
+  const file = new File([blob], fileName, { type: 'image/png' });
 
-      // Always trigger direct PNG download first so offline save works reliably
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = fileName;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
+  let savedViaNativeBridge = false;
+  if (
+    typeof window !== 'undefined' &&
+    window.ClashWidgetBridge &&
+    typeof window.ClashWidgetBridge.saveImageToGallery === 'function'
+  ) {
+    try {
+      savedViaNativeBridge = Boolean(
+        window.ClashWidgetBridge.saveImageToGallery(dataUrl, fileName)
+      );
+    } catch {
+      savedViaNativeBridge = false;
+    }
+  } else {
+    saveGeneratedImageToDevice({
+      dataUrl,
+      blob,
+      file,
+      fileName,
+      savedViaNativeBridge: false,
+    });
+  }
 
-      // If Web Share API with files is supported on mobile, also offer native share sheet
-      if (
-        typeof nav.share === 'function' &&
-        typeof nav.canShare === 'function' &&
-        nav.canShare({ files: [file] })
-      ) {
-        nav
-          .share({
-            files: [file],
-            title: `${accountName} · ${monthData.monthLabel} Clash Wrapped`,
-          })
-          .catch(() => {
-            // User dismissed share sheet; file was already downloaded
-          });
-      }
-
-      resolve(true);
-    }, 'image/png');
-  });
+  return {
+    dataUrl,
+    blob,
+    file,
+    fileName,
+    savedViaNativeBridge,
+  };
 }
+
+/**
+ * On-Device Image Save & Share Sheet Modal:
+ * Gives installed APK & PWA users a synchronous one-tap "Save to Device" button
+ * (with Android storage permission handling) and a synchronous "Share / Save to Gallery" button
+ * (preserving browser user-gesture activation), plus long-press image saving.
+ */
+export const WrappedImageSaveModal: React.FC<{
+  payload: GeneratedWrappedImagePayload | null;
+  onClose: () => void;
+}> = ({ payload, onClose }) => {
+  const [statusText, setStatusText] = useState<string>('');
+
+  useEffect(() => {
+    if (!payload) {
+      setStatusText('');
+      return;
+    }
+    if (payload.savedViaNativeBridge) {
+      setStatusText('Saved to Gallery: Pictures/ClashPlanner/' + payload.fileName);
+    } else {
+      setStatusText('Image generated! Tap "Save to Device" or "Share" below.');
+    }
+  }, [payload]);
+
+  if (!payload) return null;
+
+  const handleDirectSaveTap = () => {
+    // Request Android storage permission if running in APK and not yet granted
+    if (
+      typeof window !== 'undefined' &&
+      window.ClashWidgetBridge &&
+      typeof window.ClashWidgetBridge.hasStoragePermission === 'function' &&
+      !window.ClashWidgetBridge.hasStoragePermission()
+    ) {
+      window.ClashWidgetBridge.requestStoragePermission?.();
+    }
+
+    const ok = saveGeneratedImageToDevice(payload);
+    if (ok) {
+      setStatusText(
+        window.ClashWidgetBridge?.saveImageToGallery
+          ? `Saved to Gallery: Pictures/ClashPlanner/${payload.fileName}`
+          : `Saved ${payload.fileName} to your device downloads!`
+      );
+    }
+  };
+
+  const handleDirectShareTap = async () => {
+    const nav = navigator as Navigator & {
+      canShare?: (data?: ShareData) => boolean;
+    };
+    if (
+      typeof nav.share === 'function' &&
+      typeof nav.canShare === 'function' &&
+      nav.canShare({ files: [payload.file] })
+    ) {
+      try {
+        await nav.share({
+          files: [payload.file],
+          title: payload.fileName,
+        });
+        setStatusText('Shared / saved successfully!');
+        return;
+      } catch {
+        // User cancelled share sheet
+      }
+    } else {
+      handleDirectSaveTap();
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-3xl p-4 bg-[#0D121F] border border-[#F3CA65]/45 shadow-[0_0_50px_rgba(0,0,0,0.95)] space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-[#F3CA65] block">
+              ON-DEVICE IMAGE SAVE
+            </span>
+            <h4 className="text-sm font-extrabold text-white truncate">
+              {payload.fileName}
+            </h4>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="tactile text-[#8E9AA8] hover:text-white text-xs font-bold px-2.5 py-1 rounded-xl bg-[#161B26] border border-[#2A303C] cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Rendered PNG Preview (Also supports Long-Press -> Save Image on mobile) */}
+        <div className="rounded-2xl bg-[#080B12] border border-white/10 p-2 max-h-[52dvh] overflow-y-auto flex justify-center">
+          <img
+            src={payload.dataUrl}
+            alt="Clash Wrapped Preview"
+            className="w-full h-auto rounded-xl object-contain"
+          />
+        </div>
+
+        {statusText && (
+          <p className="text-[11px] font-bold text-[#4ADE80] text-center px-1">
+            ✅ {statusText}
+          </p>
+        )}
+
+        {/* Synchronous User-Gesture Action Buttons for Installed APK & PWA */}
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={handleDirectSaveTap}
+            className="tactile w-full py-2.5 px-3 rounded-xl text-xs font-extrabold text-[#0B0E14] bg-[#F3CA65] hover:bg-[#f7d67e] cursor-pointer flex items-center justify-center gap-1.5"
+          >
+            <span>💾 Save to Device</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleDirectShareTap()}
+            className="tactile w-full py-2.5 px-3 rounded-xl text-xs font-extrabold text-[#F3CA65] bg-[#F3CA65]/15 hover:bg-[#F3CA65]/25 border border-[#F3CA65]/45 cursor-pointer flex items-center justify-center gap-1.5"
+          >
+            <span>📤 Share / Gallery</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const InlineResolvedIcon: React.FC<{
   rawId?: string | number;
@@ -648,6 +882,8 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
   // Clickable "Time Saved / Used Potions" tab state
   const [isPotionsTabOpen, setIsPotionsTabOpen] = useState<boolean>(false);
   const [isExportingImage, setIsExportingImage] = useState<boolean>(false);
+  const [generatedWrappedPayload, setGeneratedWrappedPayload] =
+    useState<GeneratedWrappedImagePayload | null>(null);
   const wrappedCardRef = useRef<HTMLDivElement | null>(null);
 
   // Collapsible Accordion State per category
@@ -693,12 +929,15 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
     if (isExportingImage) return;
     setIsExportingImage(true);
     try {
-      await triggerClashWrappedImageExport({
+      const payload = await triggerClashWrappedImageExport({
         cardElement: wrappedCardRef.current,
         accountName,
         playerTag,
         monthData: activeMonthData,
       });
+      if (payload) {
+        setGeneratedWrappedPayload(payload);
+      }
     } finally {
       setIsExportingImage(false);
     }
@@ -713,6 +952,12 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
         playerTag={playerTag}
         townHallLevel={townHallLevel}
         monthData={activeMonthData}
+      />
+
+      {/* On-Device Save & Share Modal for Installed APK / PWA */}
+      <WrappedImageSaveModal
+        payload={generatedWrappedPayload}
+        onClose={() => setGeneratedWrappedPayload(null)}
       />
 
       {/* Top Bar: Back to Monthly Progress Option + Save as Image / Share Button */}
