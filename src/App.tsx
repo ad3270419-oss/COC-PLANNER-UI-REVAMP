@@ -10722,6 +10722,7 @@ export default function App() {
               cardElement: modalWrappedCardRef.current,
               accountName: activeAccountProfile.name,
               playerTag: activeModalPlayerTag,
+              townHallLevel: resolvedThLevel,
               monthData: currentMonthWrappedData,
             });
             if (payload) {

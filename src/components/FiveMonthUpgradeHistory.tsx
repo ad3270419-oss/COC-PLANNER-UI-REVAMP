@@ -155,6 +155,107 @@ function buildLastFiveMonthsList(nowMs: number): Array<{ monthKey: string; month
 }
 
 /**
+ * Converts any CSS color string (including oklch/oklab/color-mix) into standard rgba(...)
+ * using a 1x1 2D canvas context so html2canvas never crashes on Tailwind v4 color functions.
+ */
+let colorHelperCtx: CanvasRenderingContext2D | null = null;
+function normalizeCssColorToRgba(value: string): string {
+  if (!value || (!value.includes('okl') && !value.includes('color(') && !value.includes('color-mix'))) {
+    return value;
+  }
+  try {
+    if (!colorHelperCtx && typeof document !== 'undefined') {
+      const c = document.createElement('canvas');
+      c.width = 1;
+      c.height = 1;
+      colorHelperCtx = c.getContext('2d', { willReadFrequently: true });
+    }
+    if (!colorHelperCtx) return '#ffffff';
+    colorHelperCtx.clearRect(0, 0, 1, 1);
+    colorHelperCtx.fillStyle = value;
+    colorHelperCtx.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = colorHelperCtx.getImageData(0, 0, 1, 1).data;
+    const alpha = +(a / 255).toFixed(3);
+    return alpha >= 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  } catch {
+    return '#ffffff';
+  }
+}
+
+/**
+ * Sanitizes cloned document stylesheets & element computed styles inside html2canvas's `onclone`
+ * so Tailwind v4's `oklch(...)`, `oklab(...)`, and `in oklab` gradients never cause html2canvas to crash.
+ */
+function sanitizeClonedDocumentForHtml2Canvas(clonedDoc: Document, clonedCard: HTMLElement): void {
+  try {
+    // 1. Strip `in oklab` / `in oklch` interpolation tokens from cloned <style> tags
+    const styleTags = Array.from(clonedDoc.querySelectorAll('style'));
+    for (const styleTag of styleTags) {
+      if (styleTag.textContent) {
+        styleTag.textContent = styleTag.textContent
+          .replace(/\s+in\s+oklab/gi, '')
+          .replace(/\s+in\s+oklch/gi, '');
+      }
+    }
+
+    // 2. Detach clonedCard from any modal ancestors (which have bg-black/85 oklab styles)
+    //    and mount it directly onto clonedDoc.body at (0, 0)
+    clonedDoc.body.style.margin = '0';
+    clonedDoc.body.style.padding = '0';
+    clonedDoc.body.style.backgroundColor = '#0B0E14';
+    clonedDoc.body.style.color = '#FFFFFF';
+    clonedCard.style.position = 'relative';
+    clonedCard.style.top = '0';
+    clonedCard.style.left = '0';
+    clonedCard.style.margin = '0';
+    clonedCard.style.zIndex = '1';
+    clonedDoc.body.replaceChildren(clonedCard);
+
+    // 3. Ensure all computed color properties on clonedCard and its descendants are standard rgb/rgba
+    const win = clonedDoc.defaultView || window;
+    const nodes = [
+      clonedDoc.documentElement,
+      clonedDoc.body,
+      clonedCard,
+      ...Array.from(clonedCard.querySelectorAll<HTMLElement>('*')),
+    ];
+    const colorProps: Array<keyof CSSStyleDeclaration> = [
+      'color',
+      'backgroundColor',
+      'borderTopColor',
+      'borderRightColor',
+      'borderBottomColor',
+      'borderLeftColor',
+      'outlineColor',
+      'textDecorationColor',
+    ];
+
+    for (const node of nodes) {
+      const cs = win.getComputedStyle(node);
+      for (const prop of colorProps) {
+        const val = cs[prop];
+        if (typeof val === 'string' && (val.includes('okl') || val.includes('color('))) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (node.style as any)[prop] = normalizeCssColorToRgba(val);
+        }
+      }
+      if (cs.boxShadow && (cs.boxShadow.includes('okl') || cs.boxShadow.includes('color('))) {
+        node.style.boxShadow = '0 16px 36px rgba(0, 0, 0, 0.65)';
+      }
+      if (
+        cs.backgroundImage &&
+        (cs.backgroundImage.includes('okl') || cs.backgroundImage.includes('color('))
+      ) {
+        node.style.backgroundImage =
+          'linear-gradient(180deg, #0E1320 0%, #0B0E14 55%, #080B11 100%)';
+      }
+    }
+  } catch {
+    // Ignore sanitization errors
+  }
+}
+
+/**
  * Returns bundled html2canvas (or window.html2canvas fallback) so offline APK & PWA builds
  * never require a network connection to generate the PNG.
  */
@@ -201,7 +302,7 @@ async function inlineAllImagesInContainer(container: HTMLElement): Promise<void>
           }
         }
       } catch {
-        // Ignore individual icon fetch errors; fallback canvas drawing still works
+        // Ignore individual icon fetch errors
       }
     })
   );
@@ -221,105 +322,438 @@ function dataUrlToBlob(dataUrl: string): Blob {
 }
 
 /**
- * Pure offline 2D Canvas fallback generator
- * in case html2canvas fails for any reason.
- * Strictly renders ONLY UPGRADES (no potions, no magic snacks, no time saved).
+ * Loads the first valid HTMLImageElement from a list of candidate URLs.
  */
-function renderOfflineFallbackWrappedCanvas(
-  accountName: string,
-  playerTag: string | undefined,
-  monthData: MonthUpgradeHistoryData
-): HTMLCanvasElement {
+async function loadFirstAvailableImage(urls: string[]): Promise<HTMLImageElement | null> {
+  for (const url of urls) {
+    if (!url) continue;
+    const loaded = await new Promise<HTMLImageElement | null>((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+    if (loaded) return loaded;
+  }
+  return null;
+}
+
+function drawRoundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+/**
+ * High-Resolution Visual 2D Canvas Renderer (3x Retina Scale) with Real `.webp` Icons & Horizontal Pills.
+ * Matches the exact 420px ClashWrappedInfographicCard design (Town Hall icon in header,
+ * compact horizontal icon+level pills, rounded category containers, and dynamic auto-height).
+ * Strictly renders ONLY UPGRADES (zero mentions of Potions, Magic Snacks, or Time Saved).
+ */
+async function renderVisualWrappedCanvasWithIcons(params: {
+  accountName: string;
+  playerTag?: string;
+  townHallLevel?: number;
+  monthData: MonthUpgradeHistoryData;
+}): Promise<HTMLCanvasElement> {
+  const { accountName, playerTag, townHallLevel, monthData } = params;
+  const SCALE = 3;
+  const CARD_W = 420;
+  const PAD = 16;
+  const INNER_W = CARD_W - PAD * 2; // 388
+
+  // 1. Resolve and preload Town Hall icon
+  const thUpgradeInMonth = monthData.buildings.find(
+    (b) => String(b.rawId) === '1000001' || b.name.toLowerCase() === 'town hall'
+  );
+  const effectiveThLevel =
+    typeof townHallLevel === 'number' && townHallLevel >= 1
+      ? townHallLevel
+      : thUpgradeInMonth?.toLevel;
+  const thCandidates = effectiveThLevel
+    ? [getTownHallIconSrc(effectiveThLevel), '/icons/art_1000001.webp', './icons/art_1000001.webp']
+    : ['/icons/art_1000001.webp', './icons/art_1000001.webp'];
+  const thImgPromise = loadFirstAvailableImage(thCandidates);
+
+  // 2. Build category blocks and preload every item's .webp icon in parallel
+  const rawCategories: Array<{
+    key: string;
+    icon: string;
+    title: string;
+    countLabel: string;
+    pills: Array<{
+      id: string;
+      label: string;
+      extraGreenLabel?: string;
+      iconCandidates: string[];
+    }>;
+  }> = [
+    {
+      key: 'heroes',
+      icon: '👑',
+      title: 'HEROES',
+      countLabel: String(monthData.heroes.length),
+      pills: monthData.heroes.map((item) => ({
+        id: item.id,
+        label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        iconCandidates: resolveUpgradeIconSources({
+          rawId: item.rawId,
+          upgradeTitle: item.name,
+          upgradeLevel: item.fromLevel,
+          targetLevel: item.toLevel,
+          category: 'builders',
+        }),
+      })),
+    },
+    {
+      key: 'pethouse',
+      icon: '🐾',
+      title: 'PET HOUSE',
+      countLabel: String(monthData.pethouse.length),
+      pills: monthData.pethouse.map((item) => ({
+        id: item.id,
+        label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        iconCandidates: resolveUpgradeIconSources({
+          rawId: item.rawId,
+          upgradeTitle: item.name,
+          upgradeLevel: item.fromLevel,
+          targetLevel: item.toLevel,
+          category: 'pethouse',
+        }),
+      })),
+    },
+    {
+      key: 'laboratory',
+      icon: '🧪',
+      title: 'LABORATORY',
+      countLabel: String(monthData.laboratory.length),
+      pills: monthData.laboratory.map((item) => ({
+        id: item.id,
+        label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        iconCandidates: resolveUpgradeIconSources({
+          rawId: item.rawId,
+          upgradeTitle: item.name,
+          upgradeLevel: item.fromLevel,
+          targetLevel: item.toLevel,
+          category: 'laboratory',
+        }),
+      })),
+    },
+    {
+      key: 'buildings',
+      icon: '🛡️',
+      title: 'DEFENSES & BUILDINGS',
+      countLabel: String(monthData.buildings.length),
+      pills: monthData.buildings.map((item) => ({
+        id: item.id,
+        label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        iconCandidates: resolveUpgradeIconSources({
+          rawId: item.rawId,
+          upgradeTitle: item.name,
+          upgradeLevel: item.fromLevel,
+          targetLevel: item.toLevel,
+          category: 'builders',
+        }),
+      })),
+    },
+    {
+      key: 'walls',
+      icon: '🧱',
+      title: 'WALLS',
+      countLabel: `x${monthData.walls.reduce((s, w) => s + w.upgradedCount, 0)}`,
+      pills: monthData.walls.map((w) => ({
+        id: w.id,
+        label: `${w.fromLevel} ➔ ${w.lvl}`,
+        extraGreenLabel: `(x${w.upgradedCount})`,
+        iconCandidates: ['/icons/art_1000010.webp', './icons/art_1000010.webp'],
+      })),
+    },
+  ].filter((c) => c.pills.length > 0);
+
+  const iconMap = new Map<string, HTMLImageElement | null>();
+  await Promise.all(
+    rawCategories.flatMap((cat) =>
+      cat.pills.map(async (pill) => {
+        const img = await loadFirstAvailableImage(pill.iconCandidates);
+        iconMap.set(pill.id, img);
+      })
+    )
+  );
+  const thImg = await thImgPromise;
+
+  // 3. Measure pill horizontal wrap layout using an offscreen context
+  const measureCanvas = document.createElement('canvas');
+  const mCtx = measureCanvas.getContext('2d')!;
+  const CAT_PAD = 10;
+  const CAT_INNER_W = INNER_W - CAT_PAD * 2; // 368
+  const PILL_H = 28;
+  const PILL_GAP = 6;
+
+  interface MeasuredPill {
+    id: string;
+    x: number;
+    y: number;
+    w: number;
+    label: string;
+    extraGreenLabel?: string;
+  }
+
+  interface MeasuredCategory {
+    icon: string;
+    title: string;
+    countLabel: string;
+    boxHeight: number;
+    pills: MeasuredPill[];
+  }
+
+  const measuredCategories: MeasuredCategory[] = rawCategories.map((cat) => {
+    let curX = 0;
+    let curY = 24; // below category header row
+    const positionedPills: MeasuredPill[] = [];
+
+    for (const pill of cat.pills) {
+      mCtx.font = '700 12px Poppins, Inter, system-ui, sans-serif';
+      const labelW = Math.ceil(mCtx.measureText(pill.label).width);
+      let extraW = 0;
+      if (pill.extraGreenLabel) {
+        mCtx.font = '800 11px Poppins, Inter, system-ui, sans-serif';
+        extraW = 4 + Math.ceil(mCtx.measureText(pill.extraGreenLabel).width);
+      }
+      // 6px left pad + 20px icon + 6px gap + labelW + extraW + 8px right pad
+      const pillW = Math.min(CAT_INNER_W, 6 + 20 + 6 + labelW + extraW + 8);
+
+      if (curX > 0 && curX + pillW > CAT_INNER_W) {
+        curX = 0;
+        curY += PILL_H + PILL_GAP;
+      }
+
+      positionedPills.push({
+        id: pill.id,
+        x: curX,
+        y: curY,
+        w: pillW,
+        label: pill.label,
+        extraGreenLabel: pill.extraGreenLabel,
+      });
+
+      curX += pillW + PILL_GAP;
+    }
+
+    const totalBoxH = curY + PILL_H + CAT_PAD;
+    return {
+      icon: cat.icon,
+      title: cat.title,
+      countLabel: cat.countLabel,
+      boxHeight: totalBoxH,
+      pills: positionedPills,
+    };
+  });
+
+  // Calculate exact auto-height of the card
+  const HEADER_H = 56;
+  const HERO_BANNER_H = 54;
+  const categoriesTotalH =
+    measuredCategories.length > 0
+      ? measuredCategories.reduce((sum, c) => sum + c.boxHeight, 0) +
+        (measuredCategories.length - 1) * 8
+      : 48;
+  const FOOTER_H = 24;
+  const CARD_H =
+    PAD + HEADER_H + 10 + HERO_BANNER_H + 10 + categoriesTotalH + 10 + FOOTER_H + PAD;
+
   const canvas = document.createElement('canvas');
-  canvas.width = 1080;
-  canvas.height = 1350;
+  canvas.width = CARD_W * SCALE;
+  canvas.height = CARD_H * SCALE;
   const ctx = canvas.getContext('2d');
   if (!ctx) return canvas;
 
-  // Background gradient
-  const bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  bgGrad.addColorStop(0, '#0B0E14');
-  bgGrad.addColorStop(0.5, '#111726');
-  bgGrad.addColorStop(1, '#090C12');
+  ctx.scale(SCALE, SCALE);
+
+  // Outer card background & rounded border
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, CARD_H);
+  bgGrad.addColorStop(0, '#0E1320');
+  bgGrad.addColorStop(0.55, '#0B0E14');
+  bgGrad.addColorStop(1, '#080B11');
+  drawRoundedRectPath(ctx, 1, 1, CARD_W - 2, CARD_H - 2, 24);
   ctx.fillStyle = bgGrad;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.38)';
+  ctx.stroke();
 
-  // Outer frame border
-  ctx.strokeStyle = 'rgba(243, 202, 101, 0.35)';
-  ctx.lineWidth = 4;
-  ctx.strokeRect(40, 40, canvas.width - 80, canvas.height - 80);
+  // 1. Header: Town Hall Icon Box + Player Name/Tag + Month Pill
+  const headerY = PAD;
+  drawRoundedRectPath(ctx, PAD, headerY, 44, 44, 12);
+  ctx.fillStyle = '#161D2E';
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.42)';
+  ctx.stroke();
 
-  // Header: App Branding & Month
+  if (thImg) {
+    ctx.drawImage(thImg, PAD + 4, headerY + 4, 36, 36);
+  }
+
+  const textStartX = PAD + 54;
   ctx.fillStyle = '#F3CA65';
-  ctx.font = '800 24px Inter, system-ui, sans-serif';
-  ctx.fillText('CLASH PLANNER · MONTHLY WRAPPED', 84, 110);
+  ctx.font = '900 9px Poppins, Inter, system-ui, sans-serif';
+  ctx.fillText('CLASH PLANNER · WRAPPED', textStartX, headerY + 12);
 
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = '900 54px Inter, system-ui, sans-serif';
-  ctx.fillText(accountName.toUpperCase(), 84, 178);
+  ctx.font = '900 16px Poppins, Inter, system-ui, sans-serif';
+  ctx.fillText(accountName, textStartX, headerY + 30);
 
-  ctx.fillStyle = '#94A3B8';
-  ctx.font = '700 28px Inter, system-ui, sans-serif';
-  ctx.fillText(
-    `${playerTag ? `${playerTag} · ` : ''}${monthData.monthLabel.toUpperCase()}`,
-    84,
-    222
-  );
-
-  // Total Upgrades Hero Box
-  ctx.fillStyle = '#161C2B';
-  ctx.fillRect(84, 258, 912, 130);
-  ctx.strokeStyle = 'rgba(243, 202, 101, 0.45)';
-  ctx.lineWidth = 3;
-  ctx.strokeRect(84, 258, 912, 130);
-
-  ctx.fillStyle = '#94A3B8';
-  ctx.font = '800 24px Inter, system-ui, sans-serif';
-  ctx.fillText('TOTAL UPGRADES COMPLETED', 120, 312);
-
-  ctx.fillStyle = '#F3CA65';
-  ctx.font = '900 56px Inter, system-ui, sans-serif';
-  ctx.fillText(String(monthData.totalUpgrades), 120, 368);
-
-  // Compact Categorized Upgrades List
-  let y = 445;
-  const sections: Array<{ title: string; pills: string[] }> = [
-    {
-      title: `HEROES (${monthData.heroes.length})`,
-      pills: monthData.heroes.map((h) => `${h.fromLevel} ➔ ${h.toLevel}`),
-    },
-    {
-      title: `PET HOUSE (${monthData.pethouse.length})`,
-      pills: monthData.pethouse.map((p) => `${p.fromLevel} ➔ ${p.toLevel}`),
-    },
-    {
-      title: `LABORATORY (${monthData.laboratory.length})`,
-      pills: monthData.laboratory.map((l) => `${l.fromLevel} ➔ ${l.toLevel}`),
-    },
-    {
-      title: `DEFENSES & BUILDINGS (${monthData.buildings.length})`,
-      pills: monthData.buildings.map((b) => `${b.fromLevel} ➔ ${b.toLevel}`),
-    },
-    {
-      title: `WALLS (x${monthData.walls.reduce((s, w) => s + w.upgradedCount, 0)})`,
-      pills: monthData.walls.map((w) => `${w.fromLevel} ➔ ${w.lvl} (x${w.upgradedCount})`),
-    },
-  ];
-
-  for (const sec of sections) {
-    if (sec.pills.length === 0) continue;
-    if (y > 1220) break;
-    ctx.fillStyle = '#F3CA65';
-    ctx.font = '800 26px Inter, system-ui, sans-serif';
-    ctx.fillText(sec.title, 84, y);
-    y += 38;
-
-    ctx.fillStyle = '#F8FAFC';
-    ctx.font = '700 24px Inter, system-ui, sans-serif';
-    const rowText = sec.pills.join('   •   ');
-    ctx.fillText(rowText.slice(0, 68), 96, y);
-    y += 52;
+  if (playerTag) {
+    ctx.fillStyle = '#4ADE80';
+    ctx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillText(playerTag, textStartX, headerY + 43);
   }
+
+  // Month Badge on the right
+  ctx.font = '900 10px Poppins, Inter, system-ui, sans-serif';
+  const monthText = monthData.monthLabel.toUpperCase();
+  const monthW = Math.ceil(ctx.measureText(monthText).width) + 20;
+  const monthX = CARD_W - PAD - monthW;
+  drawRoundedRectPath(ctx, monthX, headerY + 8, monthW, 26, 10);
+  ctx.fillStyle = '#181F30';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.42)';
+  ctx.stroke();
+  ctx.fillStyle = '#F3CA65';
+  ctx.fillText(monthText, monthX + 10, headerY + 25);
+
+  // Header bottom border
+  const dividerY = headerY + HEADER_H;
+  ctx.beginPath();
+  ctx.moveTo(PAD, dividerY);
+  ctx.lineTo(CARD_W - PAD, dividerY);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // 2. Highlighted Total Upgrades Completed Banner
+  const bannerY = dividerY + 10;
+  drawRoundedRectPath(ctx, PAD, bannerY, INNER_W, HERO_BANNER_H, 16);
+  ctx.fillStyle = '#141A29';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.4)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.fillStyle = '#8E9AA8';
+  ctx.font = '800 10px Poppins, Inter, system-ui, sans-serif';
+  ctx.fillText('TOTAL UPGRADES COMPLETED', PAD + 14, bannerY + 21);
+
+  ctx.fillStyle = '#CBD5E1';
+  ctx.font = '700 11px Poppins, Inter, system-ui, sans-serif';
+  ctx.fillText('Monthly Village Progress', PAD + 14, bannerY + 38);
+
+  const totalStr = String(monthData.totalUpgrades);
+  ctx.fillStyle = '#F3CA65';
+  ctx.font = '900 24px Poppins, Inter, system-ui, sans-serif';
+  const totalW = ctx.measureText(totalStr).width;
+  ctx.fillText(totalStr, CARD_W - PAD - 14 - totalW, bannerY + 36);
+
+  // 3. Categorized Upgrades Blocks (Compact Horizontal Pills)
+  let curCatY = bannerY + HERO_BANNER_H + 10;
+
+  if (measuredCategories.length === 0) {
+    drawRoundedRectPath(ctx, PAD, curCatY, INNER_W, 48, 16);
+    ctx.fillStyle = '#121724';
+    ctx.fill();
+    ctx.strokeStyle = '#242D42';
+    ctx.stroke();
+    ctx.fillStyle = '#8E9AA8';
+    ctx.font = '700 12px Poppins, Inter, system-ui, sans-serif';
+    ctx.fillText(
+      `No completed upgrades logged for ${monthData.monthLabel} yet.`,
+      PAD + 24,
+      curCatY + 28
+    );
+    curCatY += 48;
+  } else {
+    for (const cat of measuredCategories) {
+      drawRoundedRectPath(ctx, PAD, curCatY, INNER_W, cat.boxHeight, 16);
+      ctx.fillStyle = '#121724';
+      ctx.fill();
+      ctx.strokeStyle = '#242D42';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Category Header
+      ctx.fillStyle = '#F3CA65';
+      ctx.font = '800 10px Poppins, Inter, system-ui, sans-serif';
+      ctx.fillText(`${cat.icon}  ${cat.title}`, PAD + CAT_PAD, curCatY + 18);
+
+      ctx.fillStyle = '#4ADE80';
+      ctx.font = '900 10px Poppins, Inter, system-ui, sans-serif';
+      const cntW = ctx.measureText(cat.countLabel).width;
+      ctx.fillText(cat.countLabel, CARD_W - PAD - CAT_PAD - cntW, curCatY + 18);
+
+      // Horizontal Pills
+      for (const pill of cat.pills) {
+        const px = PAD + CAT_PAD + pill.x;
+        const py = curCatY + pill.y;
+
+        drawRoundedRectPath(ctx, px, py, pill.w, PILL_H, 8);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        const iconImg = iconMap.get(pill.id);
+        if (iconImg) {
+          ctx.drawImage(iconImg, px + 6, py + 4, 20, 20);
+        }
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '700 12px Poppins, Inter, system-ui, sans-serif';
+        ctx.fillText(pill.label, px + 32, py + 18);
+
+        if (pill.extraGreenLabel) {
+          const baseLabelW = Math.ceil(ctx.measureText(pill.label).width);
+          ctx.fillStyle = '#4ADE80';
+          ctx.font = '800 11px Poppins, Inter, system-ui, sans-serif';
+          ctx.fillText(pill.extraGreenLabel, px + 32 + baseLabelW + 4, py + 18);
+        }
+      }
+
+      curCatY += cat.boxHeight + 8;
+    }
+    curCatY -= 8;
+  }
+
+  // 4. Compact Footer
+  const footerLineY = curCatY + 10;
+  ctx.beginPath();
+  ctx.moveTo(PAD, footerLineY);
+  ctx.lineTo(CARD_W - PAD, footerLineY);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.fillStyle = '#8E9AA8';
+  ctx.font = '800 9px Poppins, Inter, system-ui, sans-serif';
+  ctx.fillText('CLASH PLANNER', PAD, footerLineY + 16);
+
+  const rightFooter = 'VILLAGE UPGRADE ARCHIVE';
+  ctx.fillStyle = '#F3CA65';
+  const rfW = ctx.measureText(rightFooter).width;
+  ctx.fillText(rightFooter, CARD_W - PAD - rfW, footerLineY + 16);
 
   return canvas;
 }
@@ -378,9 +812,10 @@ export async function triggerClashWrappedImageExport(params: {
   cardElement: HTMLElement | null;
   accountName: string;
   playerTag?: string;
+  townHallLevel?: number;
   monthData: MonthUpgradeHistoryData;
 }): Promise<GeneratedWrappedImagePayload | null> {
-  const { cardElement, accountName, playerTag, monthData } = params;
+  const { cardElement, accountName, playerTag, townHallLevel, monthData } = params;
   let canvas: HTMLCanvasElement | null = null;
 
   if (cardElement) {
@@ -394,12 +829,9 @@ export async function triggerClashWrappedImageExport(params: {
           useCORS: true,
           allowTaint: false,
           logging: false,
-          scrollX: 0,
-          scrollY: 0,
-          width: cardElement.offsetWidth,
-          height: cardElement.offsetHeight,
-          windowWidth: cardElement.offsetWidth,
-          windowHeight: cardElement.offsetHeight,
+          onclone: (clonedDoc: Document, clonedEl: HTMLElement) => {
+            sanitizeClonedDocumentForHtml2Canvas(clonedDoc, clonedEl);
+          },
         });
       } catch {
         canvas = null;
@@ -408,7 +840,12 @@ export async function triggerClashWrappedImageExport(params: {
   }
 
   if (!canvas) {
-    canvas = renderOfflineFallbackWrappedCanvas(accountName, playerTag, monthData);
+    canvas = await renderVisualWrappedCanvasWithIcons({
+      accountName,
+      playerTag,
+      townHallLevel,
+      monthData,
+    });
   }
 
   const safeAccount = (accountName || 'Village').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -419,7 +856,12 @@ export async function triggerClashWrappedImageExport(params: {
   try {
     dataUrl = canvas.toDataURL('image/png');
   } catch {
-    const fallbackCanvas = renderOfflineFallbackWrappedCanvas(accountName, playerTag, monthData);
+    const fallbackCanvas = await renderVisualWrappedCanvasWithIcons({
+      accountName,
+      playerTag,
+      townHallLevel,
+      monthData,
+    });
     dataUrl = fallbackCanvas.toDataURL('image/png');
   }
 
@@ -637,8 +1079,9 @@ const InlineResolvedIcon: React.FC<{
 /**
  * Hidden Compact Infographic Card ("CLASH WRAPPED").
  * - Fixed width `w-[420px] h-auto` off-screen (`fixed top-[-9999px] left-[-9999px]`)
+ * - Uses pure #hex and rgba(...) values (zero Tailwind v4 oklch/oklab functions) so html2canvas renders cleanly
  * - Header displays the village's Town Hall icon (`getTownHallIconSrc` / `art_1000001.webp`)
- * - Compact horizontal pill layout (`flex flex-wrap gap-2`) showing ONLY icon + level transition
+ * - Compact horizontal pill layout (`flex flex-wrap gap-1.5`) showing ONLY icon + level transition
  * - CRITICAL RULE: Shows ONLY UPGRADES. Zero mentions of Potions, Magic Snacks, or Time Saved.
  */
 export const ClashWrappedInfographicCard = React.forwardRef<
@@ -711,15 +1154,15 @@ export const ClashWrappedInfographicCard = React.forwardRef<
       aria-hidden="true"
       className="fixed top-[-9999px] left-[-9999px] pointer-events-none select-none z-[-1]"
     >
-      {/* Fixed-width, auto-height compact container captured directly by html2canvas */}
+      {/* Fixed-width, auto-height compact container using pure hex/rgba colors for html2canvas */}
       <div
         ref={ref}
-        className="w-[420px] h-auto rounded-3xl p-4 bg-gradient-to-b from-[#0E1320] via-[#0B0E14] to-[#080B11] border border-[#F3CA65]/35 shadow-2xl flex flex-col gap-2.5 text-white font-sans relative overflow-hidden"
+        className="w-[420px] h-auto rounded-3xl p-4 bg-[linear-gradient(180deg,#0E1320_0%,#0B0E14_55%,#080B11_100%)] border border-[rgba(243,202,101,0.38)] flex flex-col gap-2.5 text-[#FFFFFF] font-sans relative overflow-hidden"
       >
         {/* 1. Compact Header with Village Town Hall Icon */}
-        <div className="flex items-center justify-between gap-2.5 border-b border-white/10 pb-2.5">
+        <div className="flex items-center justify-between gap-2.5 border-b border-[rgba(255,255,255,0.1)] pb-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-11 h-11 rounded-xl bg-[#161D2E] border border-[#F3CA65]/40 p-1 flex items-center justify-center shrink-0">
+            <div className="w-11 h-11 rounded-xl bg-[#161D2E] border border-[rgba(243,202,101,0.42)] p-1 flex items-center justify-center shrink-0">
               <img
                 src={thIconSrc}
                 alt="Town Hall"
@@ -735,7 +1178,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
               <p className="text-[9px] font-black tracking-[0.18em] text-[#F3CA65] uppercase leading-tight">
                 CLASH PLANNER · WRAPPED
               </p>
-              <h2 className="text-base font-black text-white tracking-tight truncate leading-snug">
+              <h2 className="text-base font-black text-[#FFFFFF] tracking-tight truncate leading-snug">
                 {accountName}
               </h2>
               {playerTag ? (
@@ -746,7 +1189,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
             </div>
           </div>
 
-          <div className="px-2.5 py-1 rounded-xl bg-[#181F30] border border-[#F3CA65]/40 text-right shrink-0">
+          <div className="px-2.5 py-1 rounded-xl bg-[#181F30] border border-[rgba(243,202,101,0.42)] text-right shrink-0">
             <span className="text-[10px] font-black uppercase tracking-wider text-[#F3CA65] block">
               {monthData.monthLabel}
             </span>
@@ -754,12 +1197,12 @@ export const ClashWrappedInfographicCard = React.forwardRef<
         </div>
 
         {/* 2. Highlighted Total Upgrades Completed Banner */}
-        <div className="rounded-2xl px-3.5 py-2.5 bg-[#141A29]/95 border border-[#F3CA65]/40 flex items-center justify-between gap-3">
+        <div className="rounded-2xl px-3.5 py-2.5 bg-[#141A29] border border-[rgba(243,202,101,0.4)] flex items-center justify-between gap-3">
           <div>
             <p className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#8E9AA8]">
               Total Upgrades Completed
             </p>
-            <p className="text-[11px] font-bold text-slate-300">
+            <p className="text-[11px] font-bold text-[#CBD5E1]">
               Monthly Village Progress
             </p>
           </div>
@@ -775,7 +1218,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
             return (
               <div
                 key={block.key}
-                className="rounded-2xl bg-[#121724]/90 border border-[#242D42] p-2.5 space-y-1.5"
+                className="rounded-2xl bg-[#121724] border border-[#242D42] p-2.5 space-y-1.5"
               >
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center gap-1.5">
@@ -792,7 +1235,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                   {block.items.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center gap-1.5 bg-white/5 border border-white/10 p-1.5 rounded-lg"
+                      className="flex items-center gap-1.5 bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.12)] p-1.5 rounded-lg"
                     >
                       <InlineResolvedIcon
                         rawId={item.rawId}
@@ -801,7 +1244,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                         toLevel={item.toLevel}
                         category={block.categoryType}
                       />
-                      <span className="text-xs font-bold text-white tabular-nums leading-none">
+                      <span className="text-xs font-bold text-[#FFFFFF] tabular-nums leading-none">
                         {item.fromLevel} ➔ {item.toLevel}
                       </span>
                     </div>
@@ -813,7 +1256,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
 
           {/* Walls Visual Block — Compact Horizontal Pills */}
           {monthData.walls.length > 0 && (
-            <div className="rounded-2xl bg-[#121724]/90 border border-[#242D42] p-2.5 space-y-1.5">
+            <div className="rounded-2xl bg-[#121724] border border-[#242D42] p-2.5 space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center gap-1.5">
                   <span>🧱</span>
@@ -828,14 +1271,14 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                 {monthData.walls.map((wall) => (
                   <div
                     key={wall.id}
-                    className="flex items-center gap-1.5 bg-white/5 border border-white/10 p-1.5 rounded-lg"
+                    className="flex items-center gap-1.5 bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.12)] p-1.5 rounded-lg"
                   >
                     <img
                       src="./icons/art_1000010.webp"
                       alt="Wall"
                       className="w-5 h-5 object-contain shrink-0"
                     />
-                    <span className="text-xs font-bold text-white tabular-nums leading-none">
+                    <span className="text-xs font-bold text-[#FFFFFF] tabular-nums leading-none">
                       {wall.fromLevel} ➔ {wall.lvl}
                     </span>
                     <span className="text-[11px] font-extrabold text-[#4ADE80] tabular-nums leading-none">
@@ -848,7 +1291,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
           )}
 
           {monthData.totalUpgrades === 0 && (
-            <div className="rounded-2xl bg-[#121724]/90 border border-[#242D42] p-3.5 text-center">
+            <div className="rounded-2xl bg-[#121724] border border-[#242D42] p-3.5 text-center">
               <p className="text-xs font-bold text-[#8E9AA8]">
                 No completed upgrades logged for {monthData.monthLabel} yet.
               </p>
@@ -857,7 +1300,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
         </div>
 
         {/* Compact Footer */}
-        <div className="pt-2 border-t border-white/10 flex items-center justify-between text-[9px] font-extrabold uppercase tracking-widest text-[#8E9AA8]">
+        <div className="pt-2 border-t border-[rgba(255,255,255,0.1)] flex items-center justify-between text-[9px] font-extrabold uppercase tracking-widest text-[#8E9AA8]">
           <span>CLASH PLANNER</span>
           <span className="text-[#F3CA65]">VILLAGE UPGRADE ARCHIVE</span>
         </div>
@@ -933,6 +1376,7 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
         cardElement: wrappedCardRef.current,
         accountName,
         playerTag,
+        townHallLevel,
         monthData: activeMonthData,
       });
       if (payload) {
