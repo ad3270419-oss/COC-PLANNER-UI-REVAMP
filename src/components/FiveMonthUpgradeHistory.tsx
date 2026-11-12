@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { resolveUpgradeIconSources } from '../cocAssets';
+import React, { useState, useEffect, useRef } from 'react';
+import { getTownHallIconSrc, resolveUpgradeIconSources } from '../cocAssets';
 
 export type HistoryCategoryKey =
   | 'heroes'
@@ -56,6 +56,8 @@ export interface MonthUpgradeHistoryData {
 export interface FiveMonthUpgradeHistoryProps {
   accountKey: string; // Strictly scoped per village (playerTag or accountId)
   accountName: string;
+  playerTag?: string;
+  townHallLevel?: number;
   nowTick?: number;
   loadAccountMonthData: (
     accountKey: string,
@@ -63,6 +65,15 @@ export interface FiveMonthUpgradeHistoryProps {
     monthLabel: string
   ) => MonthUpgradeHistoryData;
   onBackToSummary?: () => void;
+}
+
+declare global {
+  interface Window {
+    html2canvas?: (
+      element: HTMLElement,
+      options?: Record<string, unknown>
+    ) => Promise<HTMLCanvasElement>;
+  }
 }
 
 const ACCORDION_CATEGORIES: Array<{
@@ -128,6 +139,226 @@ function buildLastFiveMonthsList(nowMs: number): Array<{ monthKey: string; month
   return list;
 }
 
+/**
+ * Dynamically injects html2canvas CDN script if not already present on `window`.
+ */
+export async function ensureHtml2CanvasLoaded(): Promise<
+  ((element: HTMLElement, options?: Record<string, unknown>) => Promise<HTMLCanvasElement>) | null
+> {
+  if (typeof window === 'undefined') return null;
+  if (typeof window.html2canvas === 'function') {
+    return window.html2canvas;
+  }
+
+  return new Promise((resolve) => {
+    const existingScript = document.getElementById(
+      'html2canvas-cdn-script'
+    ) as HTMLScriptElement | null;
+    if (existingScript) {
+      existingScript.addEventListener('load', () => resolve(window.html2canvas || null), {
+        once: true,
+      });
+      existingScript.addEventListener('error', () => resolve(null), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = 'html2canvas-cdn-script';
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+    script.async = true;
+    script.onload = () => resolve(window.html2canvas || null);
+    script.onerror = () => resolve(null);
+    document.head.appendChild(script);
+  });
+}
+
+/**
+ * Pure offline 2D Canvas fallback generator
+ * in case the device has no internet connection and html2canvas CDN is not cached.
+ * Strictly renders ONLY UPGRADES (no potions, no magic snacks, no time saved).
+ */
+function renderOfflineFallbackWrappedCanvas(
+  accountName: string,
+  playerTag: string | undefined,
+  monthData: MonthUpgradeHistoryData
+): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080;
+  canvas.height = 1350;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+
+  // Background gradient
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  bgGrad.addColorStop(0, '#0B0E14');
+  bgGrad.addColorStop(0.5, '#111726');
+  bgGrad.addColorStop(1, '#090C12');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Outer frame border
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.35)';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(40, 40, canvas.width - 80, canvas.height - 80);
+
+  // Header: App Branding & Month
+  ctx.fillStyle = '#F3CA65';
+  ctx.font = '800 24px Inter, system-ui, sans-serif';
+  ctx.fillText('CLASH PLANNER · MONTHLY WRAPPED', 84, 110);
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = '900 54px Inter, system-ui, sans-serif';
+  ctx.fillText(accountName.toUpperCase(), 84, 178);
+
+  ctx.fillStyle = '#94A3B8';
+  ctx.font = '700 28px Inter, system-ui, sans-serif';
+  ctx.fillText(
+    `${playerTag ? `${playerTag} · ` : ''}${monthData.monthLabel.toUpperCase()}`,
+    84,
+    222
+  );
+
+  // Total Upgrades Hero Box
+  ctx.fillStyle = '#161C2B';
+  ctx.fillRect(84, 258, 912, 130);
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.45)';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(84, 258, 912, 130);
+
+  ctx.fillStyle = '#94A3B8';
+  ctx.font = '800 24px Inter, system-ui, sans-serif';
+  ctx.fillText('TOTAL UPGRADES COMPLETED', 120, 312);
+
+  ctx.fillStyle = '#F3CA65';
+  ctx.font = '900 56px Inter, system-ui, sans-serif';
+  ctx.fillText(String(monthData.totalUpgrades), 120, 368);
+
+  // Compact Categorized Upgrades List
+  let y = 445;
+  const sections: Array<{ title: string; pills: string[] }> = [
+    {
+      title: `HEROES (${monthData.heroes.length})`,
+      pills: monthData.heroes.map((h) => `${h.fromLevel} ➔ ${h.toLevel}`),
+    },
+    {
+      title: `PET HOUSE (${monthData.pethouse.length})`,
+      pills: monthData.pethouse.map((p) => `${p.fromLevel} ➔ ${p.toLevel}`),
+    },
+    {
+      title: `LABORATORY (${monthData.laboratory.length})`,
+      pills: monthData.laboratory.map((l) => `${l.fromLevel} ➔ ${l.toLevel}`),
+    },
+    {
+      title: `DEFENSES & BUILDINGS (${monthData.buildings.length})`,
+      pills: monthData.buildings.map((b) => `${b.fromLevel} ➔ ${b.toLevel}`),
+    },
+    {
+      title: `WALLS (x${monthData.walls.reduce((s, w) => s + w.upgradedCount, 0)})`,
+      pills: monthData.walls.map((w) => `${w.fromLevel} ➔ ${w.lvl} (x${w.upgradedCount})`),
+    },
+  ];
+
+  for (const sec of sections) {
+    if (sec.pills.length === 0) continue;
+    if (y > 1220) break;
+    ctx.fillStyle = '#F3CA65';
+    ctx.font = '800 26px Inter, system-ui, sans-serif';
+    ctx.fillText(sec.title, 84, y);
+    y += 38;
+
+    ctx.fillStyle = '#F8FAFC';
+    ctx.font = '700 24px Inter, system-ui, sans-serif';
+    const rowText = sec.pills.join('   •   ');
+    ctx.fillText(rowText.slice(0, 68), 96, y);
+    y += 52;
+  }
+
+  return canvas;
+}
+
+export async function triggerClashWrappedImageExport(params: {
+  cardElement: HTMLElement | null;
+  accountName: string;
+  playerTag?: string;
+  monthData: MonthUpgradeHistoryData;
+}): Promise<boolean> {
+  const { cardElement, accountName, playerTag, monthData } = params;
+  let canvas: HTMLCanvasElement | null = null;
+
+  if (cardElement) {
+    const html2canvasFn = await ensureHtml2CanvasLoaded();
+    if (html2canvasFn) {
+      try {
+        canvas = await html2canvasFn(cardElement, {
+          backgroundColor: '#0B0E14',
+          scale: 3,
+          useCORS: true,
+          allowTaint: true,
+          logging: false,
+          scrollX: 0,
+          scrollY: 0,
+          width: cardElement.offsetWidth,
+          height: cardElement.offsetHeight,
+          windowWidth: cardElement.offsetWidth,
+          windowHeight: cardElement.offsetHeight,
+        });
+      } catch {
+        canvas = null;
+      }
+    }
+  }
+
+  if (!canvas) {
+    canvas = renderOfflineFallbackWrappedCanvas(accountName, playerTag, monthData);
+  }
+
+  const safeAccount = (accountName || 'Village').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeMonth = monthData.monthLabel.replace(/\s+/g, '_');
+  const fileName = `Clash_Wrapped_${safeAccount}_${safeMonth}.png`;
+
+  return new Promise((resolve) => {
+    canvas!.toBlob((blob) => {
+      if (!blob) {
+        resolve(false);
+        return;
+      }
+
+      const file = new File([blob], fileName, { type: 'image/png' });
+      const nav = navigator as Navigator & {
+        canShare?: (data?: ShareData) => boolean;
+      };
+
+      // Always trigger direct PNG download first so offline save works reliably
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+
+      // If Web Share API with files is supported on mobile, also offer native share sheet
+      if (
+        typeof nav.share === 'function' &&
+        typeof nav.canShare === 'function' &&
+        nav.canShare({ files: [file] })
+      ) {
+        nav
+          .share({
+            files: [file],
+            title: `${accountName} · ${monthData.monthLabel} Clash Wrapped`,
+          })
+          .catch(() => {
+            // User dismissed share sheet; file was already downloaded
+          });
+      }
+
+      resolve(true);
+    }, 'image/png');
+  });
+}
+
 const InlineResolvedIcon: React.FC<{
   rawId?: string | number;
   name: string;
@@ -169,9 +400,244 @@ const InlineResolvedIcon: React.FC<{
   );
 };
 
+/**
+ * Hidden Compact Infographic Card ("CLASH WRAPPED").
+ * - Fixed width `w-[420px] h-auto` off-screen (`fixed top-[-9999px] left-[-9999px]`)
+ * - Header displays the village's Town Hall icon (`getTownHallIconSrc` / `art_1000001.webp`)
+ * - Compact horizontal pill layout (`flex flex-wrap gap-2`) showing ONLY icon + level transition
+ * - CRITICAL RULE: Shows ONLY UPGRADES. Zero mentions of Potions, Magic Snacks, or Time Saved.
+ */
+export const ClashWrappedInfographicCard = React.forwardRef<
+  HTMLDivElement,
+  {
+    accountName: string;
+    playerTag?: string;
+    townHallLevel?: number;
+    monthData: MonthUpgradeHistoryData;
+  }
+>(({ accountName, playerTag, townHallLevel, monthData }, ref) => {
+  const totalWallUpgrades = monthData.walls.reduce((sum, w) => sum + w.upgradedCount, 0);
+
+  // Infer Town Hall level if not explicitly passed or if upgraded this month
+  const thUpgradeInMonth = monthData.buildings.find(
+    (b) => String(b.rawId) === '1000001' || b.name.toLowerCase() === 'town hall'
+  );
+  const effectiveThLevel =
+    typeof townHallLevel === 'number' && townHallLevel >= 1
+      ? townHallLevel
+      : thUpgradeInMonth?.toLevel;
+  const initialThIconSrc = effectiveThLevel
+    ? getTownHallIconSrc(effectiveThLevel)
+    : '/icons/art_1000001.webp';
+
+  const [thIconSrc, setThIconSrc] = useState<string>(initialThIconSrc);
+  useEffect(() => {
+    setThIconSrc(initialThIconSrc);
+  }, [initialThIconSrc]);
+
+  const categoryBlocks: Array<{
+    key: HistoryCategoryKey;
+    icon: string;
+    title: string;
+    categoryType: 'builders' | 'laboratory' | 'pethouse';
+    items: StandardUpgradeHistoryItem[];
+  }> = [
+    {
+      key: 'heroes',
+      icon: '👑',
+      title: 'Heroes',
+      categoryType: 'builders',
+      items: monthData.heroes,
+    },
+    {
+      key: 'pethouse',
+      icon: '🐾',
+      title: 'Pet House',
+      categoryType: 'pethouse',
+      items: monthData.pethouse,
+    },
+    {
+      key: 'laboratory',
+      icon: '🧪',
+      title: 'Laboratory',
+      categoryType: 'laboratory',
+      items: monthData.laboratory,
+    },
+    {
+      key: 'buildings',
+      icon: '🛡️',
+      title: 'Defenses & Buildings',
+      categoryType: 'builders',
+      items: monthData.buildings,
+    },
+  ];
+
+  return (
+    <div
+      aria-hidden="true"
+      className="fixed top-[-9999px] left-[-9999px] pointer-events-none select-none z-[-1]"
+    >
+      {/* Fixed-width, auto-height compact container captured directly by html2canvas */}
+      <div
+        ref={ref}
+        className="w-[420px] h-auto rounded-3xl p-4 bg-gradient-to-b from-[#0E1320] via-[#0B0E14] to-[#080B11] border border-[#F3CA65]/35 shadow-2xl flex flex-col gap-2.5 text-white font-sans relative overflow-hidden"
+      >
+        {/* 1. Compact Header with Village Town Hall Icon */}
+        <div className="flex items-center justify-between gap-2.5 border-b border-white/10 pb-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-11 h-11 rounded-xl bg-[#161D2E] border border-[#F3CA65]/40 p-1 flex items-center justify-center shrink-0">
+              <img
+                src={thIconSrc}
+                alt="Town Hall"
+                className="w-full h-full object-contain"
+                onError={() => {
+                  if (thIconSrc !== '/icons/art_1000001.webp') {
+                    setThIconSrc('/icons/art_1000001.webp');
+                  }
+                }}
+              />
+            </div>
+            <div className="min-w-0">
+              <p className="text-[9px] font-black tracking-[0.18em] text-[#F3CA65] uppercase leading-tight">
+                CLASH PLANNER · WRAPPED
+              </p>
+              <h2 className="text-base font-black text-white tracking-tight truncate leading-snug">
+                {accountName}
+              </h2>
+              {playerTag ? (
+                <p className="text-[10px] font-bold font-mono text-[#4ADE80] truncate leading-tight">
+                  {playerTag}
+                </p>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="px-2.5 py-1 rounded-xl bg-[#181F30] border border-[#F3CA65]/40 text-right shrink-0">
+            <span className="text-[10px] font-black uppercase tracking-wider text-[#F3CA65] block">
+              {monthData.monthLabel}
+            </span>
+          </div>
+        </div>
+
+        {/* 2. Highlighted Total Upgrades Completed Banner */}
+        <div className="rounded-2xl px-3.5 py-2.5 bg-[#141A29]/95 border border-[#F3CA65]/40 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#8E9AA8]">
+              Total Upgrades Completed
+            </p>
+            <p className="text-[11px] font-bold text-slate-300">
+              Monthly Village Progress
+            </p>
+          </div>
+          <span className="text-2xl font-black text-[#F3CA65] tabular-nums leading-none">
+            {monthData.totalUpgrades}
+          </span>
+        </div>
+
+        {/* 3. Categorized Upgrades — Compact Horizontal Pill Layout (Icon + Level Transition ONLY) */}
+        <div className="space-y-2">
+          {categoryBlocks.map((block) => {
+            if (block.items.length === 0) return null;
+            return (
+              <div
+                key={block.key}
+                className="rounded-2xl bg-[#121724]/90 border border-[#242D42] p-2.5 space-y-1.5"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center gap-1.5">
+                    <span>{block.icon}</span>
+                    <span>{block.title}</span>
+                  </span>
+                  <span className="text-[10px] font-black text-[#4ADE80] tabular-nums">
+                    {block.items.length}
+                  </span>
+                </div>
+
+                {/* Dense Horizontal Flex-Wrap Pill Grid */}
+                <div className="flex flex-wrap gap-1.5">
+                  {block.items.map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-center gap-1.5 bg-white/5 border border-white/10 p-1.5 rounded-lg"
+                    >
+                      <InlineResolvedIcon
+                        rawId={item.rawId}
+                        name={item.name}
+                        fromLevel={item.fromLevel}
+                        toLevel={item.toLevel}
+                        category={block.categoryType}
+                      />
+                      <span className="text-xs font-bold text-white tabular-nums leading-none">
+                        {item.fromLevel} ➔ {item.toLevel}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Walls Visual Block — Compact Horizontal Pills */}
+          {monthData.walls.length > 0 && (
+            <div className="rounded-2xl bg-[#121724]/90 border border-[#242D42] p-2.5 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#F3CA65] flex items-center gap-1.5">
+                  <span>🧱</span>
+                  <span>Walls</span>
+                </span>
+                <span className="text-[10px] font-black text-[#4ADE80] tabular-nums">
+                  x{totalWallUpgrades}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {monthData.walls.map((wall) => (
+                  <div
+                    key={wall.id}
+                    className="flex items-center gap-1.5 bg-white/5 border border-white/10 p-1.5 rounded-lg"
+                  >
+                    <img
+                      src="./icons/art_1000010.webp"
+                      alt="Wall"
+                      className="w-5 h-5 object-contain shrink-0"
+                    />
+                    <span className="text-xs font-bold text-white tabular-nums leading-none">
+                      {wall.fromLevel} ➔ {wall.lvl}
+                    </span>
+                    <span className="text-[11px] font-extrabold text-[#4ADE80] tabular-nums leading-none">
+                      (x{wall.upgradedCount})
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {monthData.totalUpgrades === 0 && (
+            <div className="rounded-2xl bg-[#121724]/90 border border-[#242D42] p-3.5 text-center">
+              <p className="text-xs font-bold text-[#8E9AA8]">
+                No completed upgrades logged for {monthData.monthLabel} yet.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Compact Footer */}
+        <div className="pt-2 border-t border-white/10 flex items-center justify-between text-[9px] font-extrabold uppercase tracking-widest text-[#8E9AA8]">
+          <span>CLASH PLANNER</span>
+          <span className="text-[#F3CA65]">VILLAGE UPGRADE ARCHIVE</span>
+        </div>
+      </div>
+    </div>
+  );
+});
+ClashWrappedInfographicCard.displayName = 'ClashWrappedInfographicCard';
+
 export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = ({
   accountKey,
   accountName,
+  playerTag,
+  townHallLevel,
   nowTick = Date.now(),
   loadAccountMonthData,
   onBackToSummary,
@@ -181,6 +647,8 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
 
   // Clickable "Time Saved / Used Potions" tab state
   const [isPotionsTabOpen, setIsPotionsTabOpen] = useState<boolean>(false);
+  const [isExportingImage, setIsExportingImage] = useState<boolean>(false);
+  const wrappedCardRef = useRef<HTMLDivElement | null>(null);
 
   // Collapsible Accordion State per category
   const [openAccordions, setOpenAccordions] = useState<Record<HistoryCategoryKey, boolean>>({
@@ -221,10 +689,34 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
     return String(activeMonthData[key].length);
   };
 
+  const handleSaveWrappedImage = async () => {
+    if (isExportingImage) return;
+    setIsExportingImage(true);
+    try {
+      await triggerClashWrappedImageExport({
+        cardElement: wrappedCardRef.current,
+        accountName,
+        playerTag,
+        monthData: activeMonthData,
+      });
+    } finally {
+      setIsExportingImage(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
-      {/* Top Bar: Back to Monthly Progress Option + Active Village Badge */}
-      <div className="flex items-center justify-between gap-2">
+      {/* Hidden Compact Infographic Card in DOM for html2canvas export */}
+      <ClashWrappedInfographicCard
+        ref={wrappedCardRef}
+        accountName={accountName}
+        playerTag={playerTag}
+        townHallLevel={townHallLevel}
+        monthData={activeMonthData}
+      />
+
+      {/* Top Bar: Back to Monthly Progress Option + Save as Image / Share Button */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         {onBackToSummary ? (
           <button
             type="button"
@@ -245,9 +737,22 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
           </div>
         )}
 
-        <span className="px-2.5 py-1 rounded-xl bg-[#161B26] border border-[#2A303C] text-[11px] font-extrabold text-[#CBD5E1] truncate max-w-[160px]">
-          {accountName}
-        </span>
+        <div className="flex items-center gap-1.5">
+          {activeMonthData.hasData && (
+            <button
+              type="button"
+              onClick={() => void handleSaveWrappedImage()}
+              disabled={isExportingImage}
+              className="tactile inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F3CA65]/15 hover:bg-[#F3CA65]/25 border border-[#F3CA65]/45 text-xs font-extrabold text-[#F3CA65] cursor-pointer disabled:opacity-60"
+            >
+              <span>📸</span>
+              <span>{isExportingImage ? 'Saving...' : 'Save as Image'}</span>
+            </button>
+          )}
+          <span className="px-2.5 py-1 rounded-xl bg-[#161B26] border border-[#2A303C] text-[11px] font-extrabold text-[#CBD5E1] truncate max-w-[130px]">
+            {accountName}
+          </span>
+        </div>
       </div>
 
       {/* 1. Month Selector (Row of 5 Month Chips) */}

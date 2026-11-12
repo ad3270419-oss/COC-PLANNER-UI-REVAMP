@@ -12,7 +12,9 @@ import {
   resolveUpgradeIconSources,
 } from './cocAssets';
 import {
+  ClashWrappedInfographicCard,
   FiveMonthUpgradeHistory,
+  triggerClashWrappedImageExport,
   type MonthUpgradeHistoryData,
   type PotionHistoryBreakdownItem,
   type StandardUpgradeHistoryItem,
@@ -4597,6 +4599,8 @@ export default function App() {
     'builders' | 'lab' | 'pethouse' | null
   >(null);
   const [isFiveMonthArchiveOpen, setIsFiveMonthArchiveOpen] = useState<boolean>(false);
+  const [isExportingWrappedModal, setIsExportingWrappedModal] = useState<boolean>(false);
+  const modalWrappedCardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (summaryModalSection === null) {
@@ -10261,22 +10265,13 @@ export default function App() {
               <p className="text-[11px] text-gray-300 leading-relaxed">
                 Save all your village profiles, names, active upgrade timers, boosts, and helpers in one tap.
               </p>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleCopyFullBackup}
-                  className="tactile flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold text-[#fbbf24] bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 cursor-pointer flex items-center justify-center gap-1.5"
-                >
-                  <span>📋 Copy All Villages</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDownloadFullBackup}
-                  className="tactile flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold text-emerald-300 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/50 cursor-pointer flex items-center justify-center gap-1.5"
-                >
-                  <span>⬇️ Download File</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={handleCopyFullBackup}
+                className="tactile w-full py-2.5 px-3 rounded-xl text-xs font-extrabold text-[#fbbf24] bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <span>📋 Copy All Villages</span>
+              </button>
             </div>
 
             {/* Restore Section */}
@@ -10700,6 +10695,32 @@ export default function App() {
           };
         };
 
+        const currentMonthShortLabel = new Date(nowTick).toLocaleString('en-US', {
+          month: 'short',
+          year: 'numeric',
+        });
+        const currentMonthWrappedData = buildAccountMonthArchiveData(
+          activeModalAccountKey,
+          activeYearMonthKey,
+          currentMonthShortLabel
+        );
+
+        const handleExportModalWrapped = async () => {
+          if (isExportingWrappedModal) return;
+          triggerHaptic(15);
+          setIsExportingWrappedModal(true);
+          try {
+            await triggerClashWrappedImageExport({
+              cardElement: modalWrappedCardRef.current,
+              accountName: activeAccountProfile.name,
+              playerTag: activeModalPlayerTag,
+              monthData: currentMonthWrappedData,
+            });
+          } finally {
+            setIsExportingWrappedModal(false);
+          }
+        };
+
         return (
           <div
             className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
@@ -10734,16 +10755,30 @@ export default function App() {
                     · {getCurrentMonthDateRangeLabel(new Date(nowTick))}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    triggerHaptic(12);
-                    setSummaryModalSection(null);
-                  }}
-                  className="tactile text-[#8E9AA8] hover:text-white text-sm font-bold px-2.5 py-1.5 rounded-xl bg-[#161B26] border border-[#2A303C] cursor-pointer"
-                >
-                  ✕
-                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {!isFiveMonthArchiveOpen && (
+                    <button
+                      type="button"
+                      onClick={handleExportModalWrapped}
+                      disabled={isExportingWrappedModal}
+                      title="Save Clash Wrapped Upgrades Story (9:16 PNG)"
+                      className="tactile inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-[#F3CA65]/20 to-amber-500/15 hover:from-[#F3CA65]/30 hover:to-amber-500/25 border border-[#F3CA65]/45 text-[11px] font-extrabold text-[#F3CA65] cursor-pointer transition-all disabled:opacity-60"
+                    >
+                      <span>{isExportingWrappedModal ? '⏳' : '📸'}</span>
+                      <span>{isExportingWrappedModal ? 'Saving...' : 'Save as Image'}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(12);
+                      setSummaryModalSection(null);
+                    }}
+                    className="tactile text-[#8E9AA8] hover:text-white text-sm font-bold px-2.5 py-1.5 rounded-xl bg-[#161B26] border border-[#2A303C] cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
 
               {/* Scrollable Body */}
@@ -10752,6 +10787,8 @@ export default function App() {
                   <FiveMonthUpgradeHistory
                     accountKey={activeModalAccountKey}
                     accountName={activeAccountProfile.name}
+                    playerTag={activeModalPlayerTag}
+                    townHallLevel={resolvedThLevel}
                     nowTick={nowTick}
                     loadAccountMonthData={buildAccountMonthArchiveData}
                     onBackToSummary={() => {
@@ -10761,6 +10798,15 @@ export default function App() {
                   />
                 ) : (
                   <>
+                    {/* Hidden Compact Clash Wrapped Infographic Card for Current Month (Upgrades ONLY) */}
+                    <ClashWrappedInfographicCard
+                      ref={modalWrappedCardRef}
+                      accountName={activeAccountProfile.name}
+                      playerTag={activeModalPlayerTag}
+                      townHallLevel={resolvedThLevel}
+                      monthData={currentMonthWrappedData}
+                    />
+
                     {/* Option to open 5-Month Upgrade History & Stats tab */}
                     <button
                       type="button"
