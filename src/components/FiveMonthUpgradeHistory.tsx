@@ -15,6 +15,7 @@ export interface StandardUpgradeHistoryItem {
   name: string;
   fromLevel: number;
   toLevel: number;
+  count?: number; // Number of instances upgraded to this level (e.g., 2 Wizard Towers)
   completedDate: string; // e.g. "Nov 12"
 }
 
@@ -405,10 +406,11 @@ async function renderVisualWrappedCanvasWithIcons(params: {
       key: 'heroes',
       icon: '👑',
       title: 'HEROES',
-      countLabel: String(monthData.heroes.length),
+      countLabel: String(monthData.heroes.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.heroes.map((item) => ({
         id: item.id,
         label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -422,10 +424,11 @@ async function renderVisualWrappedCanvasWithIcons(params: {
       key: 'pethouse',
       icon: '🐾',
       title: 'PET HOUSE',
-      countLabel: String(monthData.pethouse.length),
+      countLabel: String(monthData.pethouse.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.pethouse.map((item) => ({
         id: item.id,
         label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -439,10 +442,11 @@ async function renderVisualWrappedCanvasWithIcons(params: {
       key: 'laboratory',
       icon: '🧪',
       title: 'LABORATORY',
-      countLabel: String(monthData.laboratory.length),
+      countLabel: String(monthData.laboratory.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.laboratory.map((item) => ({
         id: item.id,
         label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -456,10 +460,11 @@ async function renderVisualWrappedCanvasWithIcons(params: {
       key: 'buildings',
       icon: '🛡️',
       title: 'DEFENSES & BUILDINGS',
-      countLabel: String(monthData.buildings.length),
+      countLabel: String(monthData.buildings.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.buildings.map((item) => ({
         id: item.id,
         label: `${item.fromLevel} ➔ ${item.toLevel}`,
+        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -1226,7 +1231,7 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                     <span>{block.title}</span>
                   </span>
                   <span className="text-[10px] font-black text-[#4ADE80] tabular-nums">
-                    {block.items.length}
+                    {block.items.reduce((sum, i) => sum + (i.count ?? 1), 0)}
                   </span>
                 </div>
 
@@ -1247,6 +1252,11 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                       <span className="text-xs font-bold text-[#FFFFFF] tabular-nums leading-none">
                         {item.fromLevel} ➔ {item.toLevel}
                       </span>
+                      {(item.count ?? 1) > 1 && (
+                        <span className="text-[11px] font-extrabold text-[#4ADE80] tabular-nums leading-none">
+                          (x{item.count})
+                        </span>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1365,7 +1375,8 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
       const upgradedSum = activeMonthData.walls.reduce((sum, w) => sum + w.upgradedCount, 0);
       return upgradedSum > 0 ? `x${upgradedSum}` : '0';
     }
-    return String(activeMonthData[key].length);
+    const categoryTotal = activeMonthData[key].reduce((sum, item) => sum + (item.count ?? 1), 0);
+    return String(categoryTotal);
   };
 
   const handleSaveWrappedImage = async () => {
@@ -1651,6 +1662,11 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
                               <span className="font-extrabold text-[#F3CA65]">
                                 Lvl {item.fromLevel} ➔ {item.toLevel}
                               </span>
+                              {(item.count ?? 1) > 1 && (
+                                <span className="font-bold text-[#4ADE80]">
+                                  (x{item.count})
+                                </span>
+                              )}
                             </div>
                             <span className="text-[11px] font-bold text-[#8E9AA8] shrink-0">
                               ({item.completedDate})
