@@ -355,10 +355,64 @@ function drawRoundedRectPath(
 }
 
 /**
- * High-Resolution Visual 2D Canvas Renderer (3x Retina Scale) with Real `.webp` Icons & Horizontal Pills.
- * Matches the exact 420px ClashWrappedInfographicCard design (Town Hall icon in header,
- * compact horizontal icon+level pills, rounded category containers, and dynamic auto-height).
- * Strictly renders ONLY UPGRADES (zero mentions of Potions, Magic Snacks, or Time Saved).
+ * Draws an HTMLImageElement centered inside `(boxX, boxY, boxW, boxH)` while preserving
+ * its natural aspect ratio (`object-fit: contain`), preventing any stretching or squishing.
+ */
+function drawImageContain(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  boxX: number,
+  boxY: number,
+  boxW: number,
+  boxH: number
+): void {
+  const natW = img.naturalWidth || img.width || boxW;
+  const natH = img.naturalHeight || img.height || boxH;
+  if (natW <= 0 || natH <= 0) return;
+  const scale = Math.min(boxW / natW, boxH / natH);
+  const drawW = natW * scale;
+  const drawH = natH * scale;
+  const drawX = boxX + (boxW - drawW) / 2;
+  const drawY = boxY + (boxH - drawH) / 2;
+  ctx.drawImage(img, drawX, drawY, drawW, drawH);
+}
+
+/**
+ * Draws a crisp geometric right arrow (`→`) centered vertically at `centerY`
+ * between `startX` and `startX + width`.
+ */
+function drawVectorRightArrow(
+  ctx: CanvasRenderingContext2D,
+  startX: number,
+  centerY: number,
+  width: number,
+  color = '#F3CA65'
+): void {
+  const endX = startX + width;
+  const headSize = 3.2;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(startX, centerY);
+  ctx.lineTo(endX, centerY);
+  ctx.moveTo(endX - headSize, centerY - headSize);
+  ctx.lineTo(endX, centerY);
+  ctx.lineTo(endX - headSize, centerY + headSize);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * High-Resolution Symmetrical 2D Canvas Renderer (3x Retina Scale = 1380px width).
+ * - Symmetrical 3-column equal-width pill grid across every category.
+ * - Real Clash of Clans `.webp` icons for Town Hall, Category Headers, and Upgrade Items
+ *   with aspect-ratio-preserving `drawImageContain` inside framed icon wells.
+ * - Mathematical vertical centering (`ctx.textBaseline = 'middle'`) so player name,
+ *   player tag, badges, and level numbers are never clipped or shifted downward.
+ * - Strictly renders ONLY UPGRADES (zero mentions of Potions, Magic Snacks, or Time Saved).
  */
 async function renderVisualWrappedCanvasWithIcons(params: {
   accountName: string;
@@ -368,9 +422,9 @@ async function renderVisualWrappedCanvasWithIcons(params: {
 }): Promise<HTMLCanvasElement> {
   const { accountName, playerTag, townHallLevel, monthData } = params;
   const SCALE = 3;
-  const CARD_W = 450;
-  const PAD = 16;
-  const INNER_W = CARD_W - PAD * 2; // 418
+  const CARD_W = 460;
+  const PAD = 20;
+  const INNER_W = CARD_W - PAD * 2; // 420
 
   // 1. Resolve and preload Town Hall icon
   const thUpgradeInMonth = monthData.buildings.find(
@@ -385,28 +439,30 @@ async function renderVisualWrappedCanvasWithIcons(params: {
     : ['/icons/art_1000001.webp', './icons/art_1000001.webp'];
   const thImgPromise = loadFirstAvailableImage(thCandidates);
 
-  // 2. Build category blocks and preload every item's .webp icon in parallel
+  // 2. Build category blocks with official Clash of Clans .webp category icons
   const rawCategories: Array<{
     key: string;
-    icon: string;
+    headerIconCandidates: string[];
     title: string;
     countLabel: string;
     pills: Array<{
       id: string;
-      label: string;
+      fromStr: string;
+      toStr: string;
       extraGreenLabel?: string;
       iconCandidates: string[];
     }>;
   }> = [
     {
       key: 'heroes',
-      icon: '👑',
+      headerIconCandidates: ['/icons/art_28000000.webp', './icons/art_28000000.webp'],
       title: 'HEROES',
       countLabel: String(monthData.heroes.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.heroes.map((item) => ({
         id: item.id,
-        label: `${item.fromLevel} ➔ ${item.toLevel}`,
-        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
+        fromStr: String(item.fromLevel),
+        toStr: String(item.toLevel),
+        extraGreenLabel: (item.count ?? 1) > 1 ? `x${item.count}` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -418,13 +474,14 @@ async function renderVisualWrappedCanvasWithIcons(params: {
     },
     {
       key: 'pethouse',
-      icon: '🐾',
+      headerIconCandidates: ['/icons/art_1000068.webp', './icons/art_1000068.webp'],
       title: 'PET HOUSE',
       countLabel: String(monthData.pethouse.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.pethouse.map((item) => ({
         id: item.id,
-        label: `${item.fromLevel} ➔ ${item.toLevel}`,
-        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
+        fromStr: String(item.fromLevel),
+        toStr: String(item.toLevel),
+        extraGreenLabel: (item.count ?? 1) > 1 ? `x${item.count}` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -436,13 +493,14 @@ async function renderVisualWrappedCanvasWithIcons(params: {
     },
     {
       key: 'laboratory',
-      icon: '🧪',
+      headerIconCandidates: ['/icons/art_1000007.webp', './icons/art_1000007.webp'],
       title: 'LABORATORY',
       countLabel: String(monthData.laboratory.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.laboratory.map((item) => ({
         id: item.id,
-        label: `${item.fromLevel} ➔ ${item.toLevel}`,
-        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
+        fromStr: String(item.fromLevel),
+        toStr: String(item.toLevel),
+        extraGreenLabel: (item.count ?? 1) > 1 ? `x${item.count}` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -454,13 +512,14 @@ async function renderVisualWrappedCanvasWithIcons(params: {
     },
     {
       key: 'buildings',
-      icon: '🛡️',
+      headerIconCandidates: ['/icons/art_1000021.webp', './icons/art_1000021.webp'],
       title: 'DEFENSES & BUILDINGS',
       countLabel: String(monthData.buildings.reduce((s, i) => s + (i.count ?? 1), 0)),
       pills: monthData.buildings.map((item) => ({
         id: item.id,
-        label: `${item.fromLevel} ➔ ${item.toLevel}`,
-        extraGreenLabel: (item.count ?? 1) > 1 ? `(x${item.count})` : undefined,
+        fromStr: String(item.fromLevel),
+        toStr: String(item.toLevel),
+        extraGreenLabel: (item.count ?? 1) > 1 ? `x${item.count}` : undefined,
         iconCandidates: resolveUpgradeIconSources({
           rawId: item.rawId,
           upgradeTitle: item.name,
@@ -472,90 +531,86 @@ async function renderVisualWrappedCanvasWithIcons(params: {
     },
     {
       key: 'walls',
-      icon: '🧱',
+      headerIconCandidates: ['/icons/art_1000010.webp', './icons/art_1000010.webp'],
       title: 'WALLS',
       countLabel: `x${monthData.walls.reduce((s, w) => s + w.upgradedCount, 0)}`,
       pills: monthData.walls.map((w) => ({
         id: w.id,
-        label: `${w.fromLevel} ➔ ${w.lvl}`,
-        extraGreenLabel: `(x${w.upgradedCount})`,
+        fromStr: String(w.fromLevel),
+        toStr: String(w.lvl),
+        extraGreenLabel: `x${w.upgradedCount}`,
         iconCandidates: ['/icons/art_1000010.webp', './icons/art_1000010.webp'],
       })),
     },
   ].filter((c) => c.pills.length > 0);
 
   const iconMap = new Map<string, HTMLImageElement | null>();
-  await Promise.all(
-    rawCategories.flatMap((cat) =>
+  const catHeaderIconMap = new Map<string, HTMLImageElement | null>();
+
+  await Promise.all([
+    ...rawCategories.map(async (cat) => {
+      const hImg = await loadFirstAvailableImage(cat.headerIconCandidates);
+      catHeaderIconMap.set(cat.key, hImg);
+    }),
+    ...rawCategories.flatMap((cat) =>
       cat.pills.map(async (pill) => {
         const img = await loadFirstAvailableImage(pill.iconCandidates);
         iconMap.set(pill.id, img);
       })
-    )
-  );
+    ),
+  ]);
   const thImg = await thImgPromise;
 
-  // 3. Measure pill horizontal wrap layout using an offscreen context
-  const measureCanvas = document.createElement('canvas');
-  const mCtx = measureCanvas.getContext('2d')!;
-  const CAT_PAD = 10;
-  const CAT_INNER_W = INNER_W - CAT_PAD * 2; // 368
-  const PILL_H = 28;
-  const PILL_GAP = 6;
+  // 3. Compute Symmetrical 3-Column Grid Geometry for Every Category
+  const CAT_PAD = 12;
+  const CAT_HEADER_H = 26;
+  const CAT_HEADER_MB = 10;
+  const CAT_INNER_W = INNER_W - CAT_PAD * 2; // 396
+  const COLS = 3;
+  const COL_GAP = 8;
+  const ROW_GAP = 8;
+  const PILL_W = (CAT_INNER_W - COL_GAP * (COLS - 1)) / COLS; // 126.67px exact equal width
+  const PILL_H = 38;
 
-  interface MeasuredPill {
+  interface PositionedGridPill {
     id: string;
     x: number;
     y: number;
     w: number;
-    label: string;
+    fromStr: string;
+    toStr: string;
     extraGreenLabel?: string;
   }
 
   interface MeasuredCategory {
-    icon: string;
+    key: string;
     title: string;
     countLabel: string;
     boxHeight: number;
-    pills: MeasuredPill[];
+    pills: PositionedGridPill[];
   }
 
   const measuredCategories: MeasuredCategory[] = rawCategories.map((cat) => {
-    let curX = 0;
-    let curY = 24; // below category header row
-    const positionedPills: MeasuredPill[] = [];
-
-    for (const pill of cat.pills) {
-      mCtx.font = '700 12px Poppins, Inter, system-ui, sans-serif';
-      const labelW = Math.ceil(mCtx.measureText(pill.label).width);
-      let extraW = 0;
-      if (pill.extraGreenLabel) {
-        mCtx.font = '800 11px Poppins, Inter, system-ui, sans-serif';
-        extraW = 4 + Math.ceil(mCtx.measureText(pill.extraGreenLabel).width);
-      }
-      // 6px left pad + 20px icon + 6px gap + labelW + extraW + 8px right pad
-      const pillW = Math.min(CAT_INNER_W, 6 + 20 + 6 + labelW + extraW + 8);
-
-      if (curX > 0 && curX + pillW > CAT_INNER_W) {
-        curX = 0;
-        curY += PILL_H + PILL_GAP;
-      }
-
-      positionedPills.push({
+    const totalRows = Math.max(1, Math.ceil(cat.pills.length / COLS));
+    const positionedPills: PositionedGridPill[] = cat.pills.map((pill, index) => {
+      const colIdx = index % COLS;
+      const rowIdx = Math.floor(index / COLS);
+      return {
         id: pill.id,
-        x: curX,
-        y: curY,
-        w: pillW,
-        label: pill.label,
+        x: colIdx * (PILL_W + COL_GAP),
+        y: CAT_PAD + CAT_HEADER_H + CAT_HEADER_MB + rowIdx * (PILL_H + ROW_GAP),
+        w: PILL_W,
+        fromStr: pill.fromStr,
+        toStr: pill.toStr,
         extraGreenLabel: pill.extraGreenLabel,
-      });
+      };
+    });
 
-      curX += pillW + PILL_GAP;
-    }
+    const pillsGridH = totalRows * PILL_H + (totalRows - 1) * ROW_GAP;
+    const totalBoxH = CAT_PAD + CAT_HEADER_H + CAT_HEADER_MB + pillsGridH + CAT_PAD;
 
-    const totalBoxH = curY + PILL_H + CAT_PAD;
     return {
-      icon: cat.icon,
+      key: cat.key,
       title: cat.title,
       countLabel: cat.countLabel,
       boxHeight: totalBoxH,
@@ -564,16 +619,17 @@ async function renderVisualWrappedCanvasWithIcons(params: {
   });
 
   // Calculate exact auto-height of the card
-  const HEADER_H = 56;
-  const HERO_BANNER_H = 54;
+  const HEADER_H = 68;
+  const HERO_BANNER_H = 58;
+  const CAT_GAP = 10;
   const categoriesTotalH =
     measuredCategories.length > 0
       ? measuredCategories.reduce((sum, c) => sum + c.boxHeight, 0) +
-        (measuredCategories.length - 1) * 8
-      : 48;
-  const FOOTER_H = 24;
+        (measuredCategories.length - 1) * CAT_GAP
+      : 54;
+  const FOOTER_H = 28;
   const CARD_H =
-    PAD + HEADER_H + 10 + HERO_BANNER_H + 10 + categoriesTotalH + 10 + FOOTER_H + PAD;
+    PAD + HEADER_H + 14 + HERO_BANNER_H + 12 + categoriesTotalH + 14 + FOOTER_H + PAD;
 
   const canvas = document.createElement('canvas');
   canvas.width = CARD_W * SCALE;
@@ -582,179 +638,368 @@ async function renderVisualWrappedCanvasWithIcons(params: {
   if (!ctx) return canvas;
 
   ctx.scale(SCALE, SCALE);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
-  // Outer card background & rounded border
+  const FONT_SANS = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  const FONT_MONO = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+
+  // Outer Card Background & Framed Border
   const bgGrad = ctx.createLinearGradient(0, 0, 0, CARD_H);
-  bgGrad.addColorStop(0, '#0E1320');
-  bgGrad.addColorStop(0.55, '#0B0E14');
-  bgGrad.addColorStop(1, '#080B11');
+  bgGrad.addColorStop(0, '#0F1523');
+  bgGrad.addColorStop(0.5, '#0B0F19');
+  bgGrad.addColorStop(1, '#080B12');
   drawRoundedRectPath(ctx, 1, 1, CARD_W - 2, CARD_H - 2, 24);
   ctx.fillStyle = bgGrad;
   ctx.fill();
   ctx.lineWidth = 1.5;
-  ctx.strokeStyle = 'rgba(243, 202, 101, 0.38)';
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.42)';
   ctx.stroke();
 
-  // 1. Header: Town Hall Icon Box + Player Name/Tag + Month Pill
-  const headerY = PAD;
-  drawRoundedRectPath(ctx, PAD, headerY, 44, 44, 12);
-  ctx.fillStyle = '#161D2E';
-  ctx.fill();
+  // Inner subtle highlight frame for symmetry
+  drawRoundedRectPath(ctx, 5, 5, CARD_W - 10, CARD_H - 10, 20);
   ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(243, 202, 101, 0.42)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+  ctx.stroke();
+
+  // ============================================================================
+  // 1. HEADER: Framed Town Hall Emblem + Unclipped Account Name/Tag + Month Pill
+  // ============================================================================
+  const headerY = PAD;
+  const thBoxSize = 56;
+  drawRoundedRectPath(ctx, PAD, headerY, thBoxSize, thBoxSize, 14);
+  const thBoxGrad = ctx.createLinearGradient(PAD, headerY, PAD, headerY + thBoxSize);
+  thBoxGrad.addColorStop(0, '#1B2438');
+  thBoxGrad.addColorStop(1, '#111726');
+  ctx.fillStyle = thBoxGrad;
+  ctx.fill();
+  ctx.lineWidth = 1.25;
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.52)';
   ctx.stroke();
 
   if (thImg) {
-    ctx.drawImage(thImg, PAD + 4, headerY + 4, 36, 36);
+    drawImageContain(ctx, thImg, PAD + 5, headerY + 5, thBoxSize - 10, thBoxSize - 10);
   }
 
-  const textStartX = PAD + 54;
-  ctx.fillStyle = '#F3CA65';
-  ctx.font = '900 9px Poppins, Inter, system-ui, sans-serif';
-  ctx.fillText('CLASH PLANNER · WRAPPED', textStartX, headerY + 12);
-
-  ctx.fillStyle = '#FFFFFF';
-  ctx.font = '900 16px Poppins, Inter, system-ui, sans-serif';
-  ctx.fillText(accountName, textStartX, headerY + 30);
-
-  if (playerTag) {
-    ctx.fillStyle = '#4ADE80';
-    ctx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.fillText(playerTag, textStartX, headerY + 43);
-  }
-
-  // Month Badge on the right
-  ctx.font = '900 10px Poppins, Inter, system-ui, sans-serif';
+  // Month Badge on the right (measured first so we know max available width for accountName)
+  ctx.font = `800 10.5px ${FONT_SANS}`;
   const monthText = monthData.monthLabel.toUpperCase();
-  const monthW = Math.ceil(ctx.measureText(monthText).width) + 20;
+  const monthW = Math.max(82, Math.ceil(ctx.measureText(monthText).width) + 24);
+  const monthH = 30;
   const monthX = CARD_W - PAD - monthW;
-  drawRoundedRectPath(ctx, monthX, headerY + 8, monthW, 26, 10);
-  ctx.fillStyle = '#181F30';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(243, 202, 101, 0.42)';
-  ctx.stroke();
-  ctx.fillStyle = '#F3CA65';
-  ctx.fillText(monthText, monthX + 10, headerY + 25);
+  const monthY = headerY + Math.round((thBoxSize - monthH) / 2);
 
-  // Header bottom border
+  drawRoundedRectPath(ctx, monthX, monthY, monthW, monthH, 10);
+  ctx.fillStyle = '#161E31';
+  ctx.fill();
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.48)';
+  ctx.stroke();
+
+  ctx.save();
+  ctx.fillStyle = '#F3CA65';
+  ctx.font = `800 10.5px ${FONT_SANS}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(monthText, monthX + monthW / 2, monthY + monthH / 2 + 0.5);
+  ctx.restore();
+
+  // Middle Header Text Stack (with generous vertical spacing so nothing is ever clipped)
+  const textStartX = PAD + thBoxSize + 12;
+  const maxTitleW = Math.max(120, monthX - textStartX - 10);
+
+  ctx.save();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  // Eyebrow label
+  ctx.fillStyle = '#F3CA65';
+  ctx.font = `800 9.5px ${FONT_SANS}`;
+  ctx.fillText('CLASH PLANNER · WRAPPED', textStartX, headerY + 9);
+
+  // Player Name (auto-fit font size if long, zero clipping)
+  let nameFontSize = 18;
+  ctx.font = `900 ${nameFontSize}px ${FONT_SANS}`;
+  while (nameFontSize > 13 && ctx.measureText(accountName).width > maxTitleW) {
+    nameFontSize -= 1;
+    ctx.font = `900 ${nameFontSize}px ${FONT_SANS}`;
+  }
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillText(accountName, textStartX, headerY + 27);
+
+  // Player Tag inside a clean emerald badge pill (never clipped at the bottom)
+  if (playerTag) {
+    ctx.font = `700 10px ${FONT_MONO}`;
+    const tagPadX = 7;
+    const tagPillW = Math.ceil(ctx.measureText(playerTag).width) + tagPadX * 2;
+    const tagPillH = 17;
+    const tagPillY = headerY + 39;
+
+    drawRoundedRectPath(ctx, textStartX, tagPillY, tagPillW, tagPillH, 5);
+    ctx.fillStyle = 'rgba(74, 222, 128, 0.12)';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.35)';
+    ctx.stroke();
+
+    ctx.fillStyle = '#4ADE80';
+    ctx.fillText(playerTag, textStartX + tagPadX, tagPillY + tagPillH / 2 + 0.5);
+  }
+  ctx.restore();
+
+  // Header bottom divider
   const dividerY = headerY + HEADER_H;
   ctx.beginPath();
   ctx.moveTo(PAD, dividerY);
   ctx.lineTo(CARD_W - PAD, dividerY);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.09)';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // 2. Highlighted Total Upgrades Completed Banner
-  const bannerY = dividerY + 10;
+  // ============================================================================
+  // 2. TOTAL UPGRADES COMPLETED HERO BANNER
+  // ============================================================================
+  const bannerY = dividerY + 14;
+  const bannerGrad = ctx.createLinearGradient(PAD, bannerY, PAD + INNER_W, bannerY);
+  bannerGrad.addColorStop(0, '#161F33');
+  bannerGrad.addColorStop(1, '#121828');
   drawRoundedRectPath(ctx, PAD, bannerY, INNER_W, HERO_BANNER_H, 16);
-  ctx.fillStyle = '#141A29';
+  ctx.fillStyle = bannerGrad;
   ctx.fill();
-  ctx.strokeStyle = 'rgba(243, 202, 101, 0.4)';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.42)';
+  ctx.lineWidth = 1.2;
   ctx.stroke();
 
-  ctx.fillStyle = '#8E9AA8';
-  ctx.font = '800 10px Poppins, Inter, system-ui, sans-serif';
-  ctx.fillText('TOTAL UPGRADES COMPLETED', PAD + 14, bannerY + 21);
-
-  ctx.fillStyle = '#CBD5E1';
-  ctx.font = '700 11px Poppins, Inter, system-ui, sans-serif';
-  ctx.fillText('Monthly Village Progress', PAD + 14, bannerY + 38);
-
-  const totalStr = String(monthData.totalUpgrades);
+  // Gold vertical accent bar on left of banner
+  drawRoundedRectPath(ctx, PAD + 12, bannerY + 13, 3.5, HERO_BANNER_H - 26, 2);
   ctx.fillStyle = '#F3CA65';
-  ctx.font = '900 24px Poppins, Inter, system-ui, sans-serif';
-  const totalW = ctx.measureText(totalStr).width;
-  ctx.fillText(totalStr, CARD_W - PAD - 14 - totalW, bannerY + 36);
+  ctx.fill();
 
-  // 3. Categorized Upgrades Blocks (Compact Horizontal Pills)
-  let curCatY = bannerY + HERO_BANNER_H + 10;
+  ctx.save();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#94A3B8';
+  ctx.font = `800 9.5px ${FONT_SANS}`;
+  ctx.fillText('TOTAL UPGRADES COMPLETED', PAD + 24, bannerY + 21);
+
+  ctx.fillStyle = '#F8FAFC';
+  ctx.font = `700 12.5px ${FONT_SANS}`;
+  ctx.fillText('Monthly Village Progress', PAD + 24, bannerY + 38);
+  ctx.restore();
+
+  // Framed Total Count Pill on the right of the banner
+  const totalStr = String(monthData.totalUpgrades);
+  ctx.font = `900 20px ${FONT_SANS}`;
+  const totalBoxW = Math.max(52, Math.ceil(ctx.measureText(totalStr).width) + 24);
+  const totalBoxH = 36;
+  const totalBoxX = CARD_W - PAD - 12 - totalBoxW;
+  const totalBoxY = bannerY + Math.round((HERO_BANNER_H - totalBoxH) / 2);
+
+  drawRoundedRectPath(ctx, totalBoxX, totalBoxY, totalBoxW, totalBoxH, 10);
+  ctx.fillStyle = 'rgba(243, 202, 101, 0.14)';
+  ctx.fill();
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = 'rgba(243, 202, 101, 0.48)';
+  ctx.stroke();
+
+  ctx.save();
+  ctx.fillStyle = '#F3CA65';
+  ctx.font = `900 20px ${FONT_SANS}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(totalStr, totalBoxX + totalBoxW / 2, totalBoxY + totalBoxH / 2 + 0.5);
+  ctx.restore();
+
+  // ============================================================================
+  // 3. SYMMETRICAL 3-COLUMN CATEGORY CARDS
+  // ============================================================================
+  let curCatY = bannerY + HERO_BANNER_H + 12;
 
   if (measuredCategories.length === 0) {
-    drawRoundedRectPath(ctx, PAD, curCatY, INNER_W, 48, 16);
-    ctx.fillStyle = '#121724';
+    drawRoundedRectPath(ctx, PAD, curCatY, INNER_W, 54, 16);
+    ctx.fillStyle = '#111623';
     ctx.fill();
-    ctx.strokeStyle = '#242D42';
+    ctx.strokeStyle = '#232D42';
     ctx.stroke();
-    ctx.fillStyle = '#8E9AA8';
-    ctx.font = '700 12px Poppins, Inter, system-ui, sans-serif';
+
+    ctx.save();
+    ctx.fillStyle = '#94A3B8';
+    ctx.font = `700 12px ${FONT_SANS}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     ctx.fillText(
       `No completed upgrades logged for ${monthData.monthLabel} yet.`,
-      PAD + 24,
-      curCatY + 28
+      CARD_W / 2,
+      curCatY + 27
     );
-    curCatY += 48;
+    ctx.restore();
+    curCatY += 54;
   } else {
     for (const cat of measuredCategories) {
       drawRoundedRectPath(ctx, PAD, curCatY, INNER_W, cat.boxHeight, 16);
-      ctx.fillStyle = '#121724';
+      ctx.fillStyle = '#111623';
       ctx.fill();
-      ctx.strokeStyle = '#242D42';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#232D42';
+      ctx.lineWidth = 1.1;
       ctx.stroke();
 
-      // Category Header
+      // Category Header Row (Real CoC .webp icon inside a 22x22 badge + Title + Right Count Pill)
+      const catHeaderY = curCatY + CAT_PAD;
+      const catHeaderMidY = catHeaderY + CAT_HEADER_H / 2;
+
+      drawRoundedRectPath(ctx, PAD + CAT_PAD, catHeaderY + 2, 22, 22, 6);
+      ctx.fillStyle = '#192236';
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(243, 202, 101, 0.35)';
+      ctx.stroke();
+
+      const catHeaderImg = catHeaderIconMap.get(cat.key);
+      if (catHeaderImg) {
+        drawImageContain(ctx, catHeaderImg, PAD + CAT_PAD + 3, catHeaderY + 5, 16, 16);
+      }
+
+      ctx.save();
       ctx.fillStyle = '#F3CA65';
-      ctx.font = '800 10px Poppins, Inter, system-ui, sans-serif';
-      ctx.fillText(`${cat.icon}  ${cat.title}`, PAD + CAT_PAD, curCatY + 18);
+      ctx.font = `800 10.5px ${FONT_SANS}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(cat.title, PAD + CAT_PAD + 29, catHeaderMidY + 0.5);
+      ctx.restore();
 
+      // Category Count Pill on the right
+      ctx.font = `800 10.5px ${FONT_SANS}`;
+      const cntBadgeW = Math.max(26, Math.ceil(ctx.measureText(cat.countLabel).width) + 14);
+      const cntBadgeH = 20;
+      const cntBadgeX = CARD_W - PAD - CAT_PAD - cntBadgeW;
+      const cntBadgeY = catHeaderY + Math.round((CAT_HEADER_H - cntBadgeH) / 2);
+
+      drawRoundedRectPath(ctx, cntBadgeX, cntBadgeY, cntBadgeW, cntBadgeH, 6);
+      ctx.fillStyle = 'rgba(74, 222, 128, 0.14)';
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(74, 222, 128, 0.36)';
+      ctx.stroke();
+
+      ctx.save();
       ctx.fillStyle = '#4ADE80';
-      ctx.font = '900 10px Poppins, Inter, system-ui, sans-serif';
-      const cntW = ctx.measureText(cat.countLabel).width;
-      ctx.fillText(cat.countLabel, CARD_W - PAD - CAT_PAD - cntW, curCatY + 18);
+      ctx.font = `800 10.5px ${FONT_SANS}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(cat.countLabel, cntBadgeX + cntBadgeW / 2, cntBadgeY + cntBadgeH / 2 + 0.5);
+      ctx.restore();
 
-      // Horizontal Pills
+      // Symmetrical 3-Column Pills
       for (const pill of cat.pills) {
         const px = PAD + CAT_PAD + pill.x;
         const py = curCatY + pill.y;
+        const pillMidY = py + PILL_H / 2;
 
-        drawRoundedRectPath(ctx, px, py, pill.w, PILL_H, 8);
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+        // Pill background & border
+        drawRoundedRectPath(ctx, px, py, pill.w, PILL_H, 10);
+        ctx.fillStyle = '#171F30';
         ctx.fill();
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.11)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Uniform 28x28 rounded icon well on the left of the pill
+        const wellX = px + 5;
+        const wellY = py + 5;
+        const wellSize = 28;
+        drawRoundedRectPath(ctx, wellX, wellY, wellSize, wellSize, 7);
+        ctx.fillStyle = '#0E1320';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
         ctx.lineWidth = 1;
         ctx.stroke();
 
         const iconImg = iconMap.get(pill.id);
         if (iconImg) {
-          ctx.drawImage(iconImg, px + 6, py + 4, 20, 20);
+          drawImageContain(ctx, iconImg, wellX + 2, wellY + 2, wellSize - 4, wellSize - 4);
         }
 
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = '700 12px Poppins, Inter, system-ui, sans-serif';
-        ctx.fillText(pill.label, px + 32, py + 18);
+        // Level transition + optional (xN) centered inside the right area of the pill
+        const textAreaX = wellX + wellSize + 4;
+        const textAreaW = px + pill.w - 4 - textAreaX;
 
+        const hasMultiCount = Boolean(pill.extraGreenLabel);
+        const lvlFontSize = hasMultiCount ? 11.5 : 12.5;
+        const arrowW = hasMultiCount ? 9 : 11;
+        const arrowGap = hasMultiCount ? 3.5 : 4.5;
+
+        ctx.save();
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
+
+        ctx.font = `800 ${lvlFontSize}px ${FONT_SANS}`;
+        const fromW = ctx.measureText(pill.fromStr).width;
+        const toW = ctx.measureText(pill.toStr).width;
+
+        let extraW = 0;
+        const extraGap = 4;
         if (pill.extraGreenLabel) {
-          const baseLabelW = Math.ceil(ctx.measureText(pill.label).width);
-          ctx.fillStyle = '#4ADE80';
-          ctx.font = '800 11px Poppins, Inter, system-ui, sans-serif';
-          ctx.fillText(pill.extraGreenLabel, px + 32 + baseLabelW + 4, py + 18);
+          ctx.font = `800 10.5px ${FONT_SANS}`;
+          extraW = extraGap + ctx.measureText(pill.extraGreenLabel).width;
         }
+
+        const totalGroupW = fromW + arrowGap + arrowW + arrowGap + toW + extraW;
+        const startDrawX = textAreaX + Math.max(1, (textAreaW - totalGroupW) / 2);
+
+        // Draw `fromLevel`
+        ctx.font = `800 ${lvlFontSize}px ${FONT_SANS}`;
+        ctx.fillStyle = '#E2E8F0';
+        ctx.fillText(pill.fromStr, startDrawX, pillMidY + 0.5);
+
+        // Draw crisp vector arrow `→`
+        const arrowStartX = startDrawX + fromW + arrowGap;
+        drawVectorRightArrow(ctx, arrowStartX, pillMidY, arrowW, '#F3CA65');
+
+        // Draw `toLevel`
+        const toStartX = arrowStartX + arrowW + arrowGap;
+        ctx.font = `900 ${lvlFontSize}px ${FONT_SANS}`;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillText(pill.toStr, toStartX, pillMidY + 0.5);
+
+        // Draw `xN` multiplier if > 1
+        if (pill.extraGreenLabel) {
+          ctx.font = `800 10.5px ${FONT_SANS}`;
+          ctx.fillStyle = '#4ADE80';
+          ctx.fillText(pill.extraGreenLabel, toStartX + toW + extraGap, pillMidY + 0.5);
+        }
+
+        ctx.restore();
       }
 
-      curCatY += cat.boxHeight + 8;
+      curCatY += cat.boxHeight + CAT_GAP;
     }
-    curCatY -= 8;
+    curCatY -= CAT_GAP;
   }
 
-  // 4. Compact Footer
-  const footerLineY = curCatY + 10;
+  // ============================================================================
+  // 4. SYMMETRICAL FOOTER
+  // ============================================================================
+  const footerLineY = curCatY + 14;
   ctx.beginPath();
   ctx.moveTo(PAD, footerLineY);
   ctx.lineTo(CARD_W - PAD, footerLineY);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.09)';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  ctx.fillStyle = '#8E9AA8';
-  ctx.font = '800 9px Poppins, Inter, system-ui, sans-serif';
-  ctx.fillText('CLASH PLANNER', PAD, footerLineY + 16);
+  const footerTextMidY = footerLineY + 16;
+  ctx.save();
+  ctx.textBaseline = 'middle';
+  ctx.font = `800 9.5px ${FONT_SANS}`;
 
-  const rightFooter = 'VILLAGE UPGRADE ARCHIVE';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#8E9AA8';
+  ctx.fillText('CLASH PLANNER', PAD, footerTextMidY);
+
+  ctx.textAlign = 'right';
   ctx.fillStyle = '#F3CA65';
-  const rfW = ctx.measureText(rightFooter).width;
-  ctx.fillText(rightFooter, CARD_W - PAD - rfW, footerLineY + 16);
+  ctx.fillText('VILLAGE UPGRADE ARCHIVE', CARD_W - PAD, footerTextMidY);
+  ctx.restore();
 
   return canvas;
 }
@@ -819,7 +1064,21 @@ export async function triggerClashWrappedImageExport(params: {
   const { cardElement, accountName, playerTag, townHallLevel, monthData } = params;
   let canvas: HTMLCanvasElement | null = null;
 
-  if (cardElement) {
+  // Primary Renderer: Direct 3x Retina 2D Canvas Engine (guarantees symmetrical 3-column grid,
+  // aspect-ratio-preserved CoC icons, and zero html2canvas text baseline clipping on mobile)
+  try {
+    canvas = await renderVisualWrappedCanvasWithIcons({
+      accountName,
+      playerTag,
+      townHallLevel,
+      monthData,
+    });
+  } catch {
+    canvas = null;
+  }
+
+  // Fallback to html2canvas only if direct canvas rendering ever fails
+  if (!canvas && cardElement) {
     const html2canvasFn = await ensureHtml2CanvasLoaded();
     if (html2canvasFn) {
       try {
@@ -841,12 +1100,7 @@ export async function triggerClashWrappedImageExport(params: {
   }
 
   if (!canvas) {
-    canvas = await renderVisualWrappedCanvasWithIcons({
-      accountName,
-      playerTag,
-      townHallLevel,
-      monthData,
-    });
+    return null;
   }
 
   const safeAccount = (accountName || 'Village').replace(/[^a-zA-Z0-9_-]/g, '_');
