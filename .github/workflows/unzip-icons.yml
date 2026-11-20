@@ -1,0 +1,24 @@
+
+name: Unzip Icons
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract and Push Icons
+        run: |
+          unzip -o "public/New icons coc.zip" -d public/temp_extract
+          rm -rf public/coc-assets
+          mv "public/temp_extract/New icons coc/assets" public/coc-assets
+          rm -rf public/temp_extract "public/New icons coc.zip"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Extract TH19 webp icons to public/coc-assets"
+          git push
