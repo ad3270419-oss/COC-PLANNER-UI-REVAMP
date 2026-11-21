@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import {
   ITEM_NAMES_BY_ID,
+  TownHallAssetImage,
   UpgradeAssetIcon,
   getTownHallIconSrc,
   resolveUpgradeIconSources,
@@ -68,6 +69,17 @@ export const COC_NAMES: Record<string | number, string> = {
   1000093: "Helper Hut",
   1000097: "Crafting Station",
   1000102: "Super Wizard Tower",
+  1000106: "Squad Barracks",
+  1000107: "Spiky Tower",
+  1000108: "Firecracker Tower",
+
+  // Guardians
+  107000000: "Longshot",
+  107000001: "Smasher",
+  107000008: "Logger",
+
+  // Seasonal Defense Stat Module Fix
+  102000033: "Hot Candle - HP",
 
   // Traps
   12000000: "Bomb",
@@ -92,7 +104,8 @@ export const COC_NAMES: Record<string | number, string> = {
   // Helpers & Assistants
   93000000: "Builder's Apprentice",
   93000001: "Lab Apprentice",
-  93000002: "Prospector"
+  93000002: "Prospector",
+  93000003: "Alchemist"
 };
 
 // Merge Pets, Troops & Siege Machines, Spells, and item_names.json into COC_NAMES
@@ -173,10 +186,13 @@ Object.assign(COC_NAMES, ITEM_NAMES_BY_ID, {
   26000109: "Ice Block Spell",
   26000120: "Totem Spell",
   26000123: "Angry Spell",
+  26000153: "Heroic Spell",
 
   // --- HELPERS / APPRENTICES (93000000 series) ---
   93000000: "Builder's Apprentice",
-  93000001: "Lab Apprentice"
+  93000001: "Lab Apprentice",
+  93000002: "Prospector",
+  93000003: "Alchemist"
 });
 
 type PlannerCategoryTab = 'builders' | 'laboratory' | 'pethouse';
@@ -3300,13 +3316,13 @@ function formatWidgetCompactDay(timestamp: number, now = Date.now()): string {
 }
 
 function resolveWidgetThNumber(d: SavedState, profileName: string): number {
-  if (typeof d.thLevel === 'number' && d.thLevel >= 1 && d.thLevel <= 18) {
+  if (typeof d.thLevel === 'number' && d.thLevel >= 1 && d.thLevel <= 19) {
     return Math.floor(d.thLevel);
   }
   const nameMatch = profileName.match(/TH\s*(\d{1,2})/i);
   if (nameMatch && nameMatch[1]) {
     const parsed = parseInt(nameMatch[1], 10);
-    if (parsed >= 1 && parsed <= 18) return parsed;
+    if (parsed >= 1 && parsed <= 19) return parsed;
   }
   return 17;
 }
@@ -8412,19 +8428,19 @@ export default function App() {
 
   // Resolve Town Hall level for the Hero Header Card 3D render
   const resolvedThLevel = (() => {
-    if (typeof thLevel === 'number' && thLevel >= 1 && thLevel <= 18) {
+    if (typeof thLevel === 'number' && thLevel >= 1 && thLevel <= 19) {
       return thLevel;
     }
     const thUpgradeInResults = displayedBuilderResults.find(
       (r) => r.rawId === '1000001' || r.upgradeTitle?.toLowerCase() === 'town hall'
     );
     if (thUpgradeInResults?.upgradeLevel) {
-      return Math.min(18, Math.max(1, thUpgradeInResults.upgradeLevel));
+      return Math.min(19, Math.max(1, thUpgradeInResults.upgradeLevel));
     }
     const nameMatch = activeAccountProfile?.name?.match(/TH\s*(\d{1,2})/i);
     if (nameMatch) {
       const parsed = parseInt(nameMatch[1], 10);
-      if (parsed >= 1 && parsed <= 18) return parsed;
+      if (parsed >= 1 && parsed <= 19) return parsed;
     }
     return 17;
   })();
@@ -8705,12 +8721,9 @@ export default function App() {
 
             {/* Right Column: Large 3D Render of Town Hall */}
             <div className="w-24 h-24 sm:w-28 sm:h-28 shrink-0 flex items-center justify-center relative">
-              <img
-                src={getTownHallIconSrc(resolvedThLevel)}
+              <TownHallAssetImage
+                thLevel={resolvedThLevel}
                 alt={`Town Hall ${resolvedThLevel}`}
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).src = '/icons/art_1000001.webp';
-                }}
                 className="w-full h-full object-contain select-none pointer-events-none drop-shadow-[0_10px_20px_rgba(0,0,0,0.65)]"
               />
             </div>
@@ -11570,13 +11583,14 @@ export default function App() {
                                   className="rounded-2xl p-3 bg-[#161B26] border border-[#2A303C] flex items-center justify-between gap-3"
                                 >
                                   <div className="flex items-center gap-3 min-w-0">
-                                    <div className="w-12 h-12 rounded-xl bg-[#1E2534] border border-[#2D364A] p-1.5 flex items-center justify-center shrink-0">
-                                      <img
-                                        src="./icons/art_1000010.webp"
-                                        alt="Wall"
-                                        className="w-full h-full object-contain"
-                                      />
-                                    </div>
+                                    <UpgradeAssetIcon
+                                      rawId="1000010"
+                                      upgradeTitle="Wall"
+                                      upgradeLevel={wall.fromLevel}
+                                      targetLevel={wall.lvl}
+                                      category="builders"
+                                      className="!w-12 !h-12 !rounded-xl"
+                                    />
                                     <div className="min-w-0">
                                       <p className="text-sm font-bold text-white truncate">
                                         Wall
@@ -11822,8 +11836,8 @@ export default function App() {
               <div className="rounded-[22px] bg-[#121622] border border-[#262F42] p-3.5 shadow-[0_20px_50px_rgba(0,0,0,0.9)] space-y-2.5 max-h-[80dvh] flex flex-col">
                 {/* 1. Widget Header: 3D TH Icon + Village Name (NO Tag) + Switch Button + Refresh Button */}
                 <div className="flex items-center gap-2.5 shrink-0">
-                  <img
-                    src={getTownHallIconSrc(thNum)}
+                  <TownHallAssetImage
+                    thLevel={thNum}
                     alt={`Town Hall ${thNum}`}
                     className="w-11 h-11 object-contain shrink-0 drop-shadow-md"
                   />

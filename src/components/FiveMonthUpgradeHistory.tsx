@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import html2canvas from 'html2canvas';
-import { getTownHallIconSrc, resolveUpgradeIconSources } from '../cocAssets';
+import {
+  TownHallAssetImage,
+  getTownHallIconSources,
+  resolveUpgradeIconSources,
+} from '../cocAssets';
 
 export type HistoryCategoryKey =
   | 'heroes'
@@ -435,7 +439,7 @@ async function renderVisualWrappedCanvasWithIcons(params: {
       ? townHallLevel
       : thUpgradeInMonth?.toLevel;
   const thCandidates = effectiveThLevel
-    ? [getTownHallIconSrc(effectiveThLevel), '/icons/art_1000001.webp', './icons/art_1000001.webp']
+    ? [...getTownHallIconSources(effectiveThLevel), './icons/art_1000001.webp']
     : ['/icons/art_1000001.webp', './icons/art_1000001.webp'];
   const thImgPromise = loadFirstAvailableImage(thCandidates);
 
@@ -539,7 +543,16 @@ async function renderVisualWrappedCanvasWithIcons(params: {
         fromStr: String(w.fromLevel),
         toStr: String(w.lvl),
         extraGreenLabel: `x${w.upgradedCount}`,
-        iconCandidates: ['/icons/art_1000010.webp', './icons/art_1000010.webp'],
+        iconCandidates: [
+          ...resolveUpgradeIconSources({
+            rawId: '1000010',
+            upgradeTitle: 'Wall',
+            upgradeLevel: w.fromLevel,
+            targetLevel: w.lvl,
+            category: 'builders',
+          }),
+          './icons/art_1000010.webp',
+        ],
       })),
     },
   ].filter((c) => c.pills.length > 0);
@@ -1359,14 +1372,6 @@ export const ClashWrappedInfographicCard = React.forwardRef<
     typeof townHallLevel === 'number' && townHallLevel >= 1
       ? townHallLevel
       : thUpgradeInMonth?.toLevel;
-  const initialThIconSrc = effectiveThLevel
-    ? getTownHallIconSrc(effectiveThLevel)
-    : '/icons/art_1000001.webp';
-
-  const [thIconSrc, setThIconSrc] = useState<string>(initialThIconSrc);
-  useEffect(() => {
-    setThIconSrc(initialThIconSrc);
-  }, [initialThIconSrc]);
 
   const categoryBlocks: Array<{
     key: HistoryCategoryKey;
@@ -1419,15 +1424,10 @@ export const ClashWrappedInfographicCard = React.forwardRef<
         <div className="flex items-center justify-between border-b border-[rgba(255,255,255,0.1)] pb-3 mb-3">
           <div className="flex items-center min-w-0 mr-3">
             <div className="w-11 h-11 rounded-xl bg-[#161D2E] border border-[rgba(243,202,101,0.42)] p-1 flex items-center justify-center shrink-0 mr-2.5">
-              <img
-                src={thIconSrc}
+              <TownHallAssetImage
+                thLevel={effectiveThLevel}
                 alt="Town Hall"
                 className="w-9 h-9 object-contain"
-                onError={() => {
-                  if (thIconSrc !== '/icons/art_1000001.webp') {
-                    setThIconSrc('/icons/art_1000001.webp');
-                  }
-                }}
               />
             </div>
             <div className="min-w-0">
@@ -1535,9 +1535,12 @@ export const ClashWrappedInfographicCard = React.forwardRef<
                     key={wall.id}
                     className="inline-flex items-center bg-[rgba(255,255,255,0.10)] border border-[rgba(255,255,255,0.14)] rounded px-2 py-1 mr-2 mb-2"
                   >
-                    <img
-                      src="./icons/art_1000010.webp"
-                      alt="Wall"
+                    <InlineResolvedIcon
+                      rawId="1000010"
+                      name="Wall"
+                      fromLevel={wall.fromLevel}
+                      toLevel={wall.lvl}
+                      category="builders"
                       className="w-4 h-4 mr-1.5 object-contain shrink-0"
                     />
                     <span className="text-xs font-bold text-[#FFFFFF] tabular-nums whitespace-nowrap">
@@ -1874,9 +1877,12 @@ export const FiveMonthUpgradeHistory: React.FC<FiveMonthUpgradeHistoryProps> = (
                               className="rounded-xl bg-[#181E2C] border border-[#263044] px-3 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-[13px]"
                             >
                               <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                                <img
-                                  src="./icons/art_1000010.webp"
-                                  alt="Wall"
+                                <InlineResolvedIcon
+                                  rawId="1000010"
+                                  name="Wall"
+                                  fromLevel={wall.fromLevel}
+                                  toLevel={wall.lvl}
+                                  category="builders"
                                   className="w-4 h-4 inline object-contain shrink-0"
                                 />
                                 <span className="font-bold text-white">Wall:</span>

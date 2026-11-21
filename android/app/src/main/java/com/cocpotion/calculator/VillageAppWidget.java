@@ -317,7 +317,7 @@ public class VillageAppWidget extends AppWidgetProvider {
                     } catch (NumberFormatException ignored) {}
                 }
             }
-            if (parsedTargetTh >= 1 && parsedTargetTh <= 18 && "town hall".equals(lowerTitle)) {
+            if (parsedTargetTh >= 1 && parsedTargetTh <= 19 && "town hall".equals(lowerTitle)) {
                 orderedNames.add("art_town_hall_" + parsedTargetTh);
             }
         }

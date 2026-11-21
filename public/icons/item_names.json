@@ -75,6 +75,10 @@
   "1000093": "Helper Hut",
   "1000097": "Crafting Station",
   "1000102": "Super Wizard Tower",
+  "1000106": "Squad Barracks",
+  "1000107": "Spiky Tower",
+  "1000108": "Firecracker Tower",
+  "102000033": "Hot Candle - HP",
   "107000000": "Longshot",
   "107000001": "Smasher",
   "107000008": "Logger",
@@ -110,6 +114,7 @@
   "26000109": "Ice Block Spell",
   "26000120": "Totem Spell",
   "26000123": "Angry Spell",
+  "26000153": "Heroic Spell",
   "28000000": "Barbarian King",
   "28000001": "Archer Queen",
   "28000002": "Grand Warden",
@@ -229,5 +234,9 @@
   "73000010": "Spirit Fox",
   "73000011": "Angry Jelly",
   "73000016": "Sneezy",
-  "73000017": "Greedy Raven"
+  "73000017": "Greedy Raven",
+  "93000000": "Builder's Apprentice",
+  "93000001": "Lab Apprentice",
+  "93000002": "Prospector",
+  "93000003": "Alchemist"
 }
