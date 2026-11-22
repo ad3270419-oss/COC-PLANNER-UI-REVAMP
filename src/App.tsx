@@ -2009,8 +2009,8 @@ export async function ensureDefaultNotificationChannel(): Promise<void> {
       vibration: true,
     });
     notificationChannelCreated = true;
-  } catch {
-    // Ignore errors in web preview environments where native plugin is unavailable
+  } catch (err) {
+    console.error('[Notifications]', err);
   }
 }
 
@@ -2029,15 +2029,15 @@ export async function requestNotificationPermissions(): Promise<boolean> {
         const requested = await LocalNotifications.requestPermissions();
         granted = requested.display === 'granted';
       }
-    } catch {
-      // Ignore errors in web preview environments where native plugin is unavailable
+    } catch (err) {
+      console.error('[Notifications]', err);
     }
     if (!granted && Capacitor.isNativePlatform()) {
       try {
         const enabled = await LocalNotifications.areEnabled();
         granted = enabled.value === true;
-      } catch {
-        // Ignore fallback error
+      } catch (err) {
+        console.error('[Notifications]', err);
       }
     }
     return granted;
@@ -2055,7 +2055,8 @@ async function canUseExactAlarmsSafely(): Promise<boolean> {
   try {
     const exactStatus = await LocalNotifications.checkExactNotificationSetting();
     return exactStatus.exact_alarm === 'granted';
-  } catch {
+  } catch (err) {
+    console.error('[Notifications]', err);
     // Do NOT block or redirect to Settings if exact alarm check fails — fall back to inexact allowWhileIdle
     return false;
   }
@@ -2091,7 +2092,8 @@ async function scheduleNotificationsWithFallback(
   await ensureDefaultNotificationChannel();
   try {
     await LocalNotifications.schedule({ notifications });
-  } catch {
+  } catch (err) {
+    console.error('[Notifications]', err);
     // Never abort on exact alarm permission or channel rejection: retry as inexact + allowWhileIdle
     const fallbackNotifications: LocalNotificationSchema[] = notifications.map((n) => ({
       ...n,
@@ -2102,8 +2104,8 @@ async function scheduleNotificationsWithFallback(
     }));
     try {
       await LocalNotifications.schedule({ notifications: fallbackNotifications });
-    } catch {
-      // Ignore errors in non-native environments
+    } catch (fallbackErr) {
+      console.error('[Notifications]', fallbackErr);
     }
   }
 }
@@ -2114,8 +2116,8 @@ async function cancelSlotNotification(villageId: string, slotKey: string): Promi
     untrackVillageNotificationId(villageId, notificationId);
     try {
       await LocalNotifications.cancel({ notifications: [{ id: notificationId }] });
-    } catch {
-      // Ignore errors in non-native environments
+    } catch (err) {
+      console.error('[Notifications]', err);
     }
   });
 }
@@ -2134,8 +2136,8 @@ async function scheduleExactSlotNotification(params: {
     // Always clear any previously scheduled notification for this specific slot first
     try {
       await LocalNotifications.cancel({ notifications: [{ id: uniqueNumericId }] });
-    } catch {
-      // Ignore errors in non-native environments
+    } catch (err) {
+      console.error('[Notifications]', err);
     }
 
     const finishEpochMs =
@@ -2185,8 +2187,8 @@ async function scheduleBuilderNotificationsForVillage(
       await LocalNotifications.cancel({
         notifications: idsToCancel.map((id) => ({ id })),
       });
-    } catch {
-      // Ignore errors in non-native environments
+    } catch (err) {
+      console.error('[Notifications]', err);
     }
 
     await requestNotificationPermissions();
@@ -2370,8 +2372,8 @@ async function cancelAllNotificationsForVillageImmediate(villageId: string): Pro
       await LocalNotifications.cancel({
         notifications: uniqueIds.map((id) => ({ id })),
       });
-    } catch {
-      // Ignore errors in non-native environments
+    } catch (err) {
+      console.error('[Notifications]', err);
     }
   }
 }
