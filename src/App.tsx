@@ -2079,9 +2079,9 @@ function buildNativeNotificationPayload(params: {
     },
     channelId: NOTIFICATION_CHANNEL_ID,
     smallIcon: NOTIFICATION_SMALL_ICON,
-    foreground: true,
-    isExactNotification: params.isExactNotification,
-    isExactMandatory: false,
+    
+    
+    
   };
 }
 
