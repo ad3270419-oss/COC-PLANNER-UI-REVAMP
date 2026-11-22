@@ -1,6 +1,9 @@
 package com.cocpotion.calculator;
 
 import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
@@ -36,6 +39,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        ensureUpgradeNotificationChannel();
         Window window = getWindow();
         if (window != null) {
             int topThemeColor = Color.parseColor("#0f172a");
@@ -65,6 +69,26 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         VillageAppWidget.updateAllWidgets(getApplicationContext());
+    }
+
+    private void ensureUpgradeNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager notificationManager =
+                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (notificationManager != null) {
+                NotificationChannel channel = new NotificationChannel(
+                    "clash_alerts_v2",
+                    "Upgrade Reminders",
+                    NotificationManager.IMPORTANCE_HIGH
+                );
+                channel.setDescription(
+                    "Clash of Clans builder, laboratory, pet house, boost, and helper alerts"
+                );
+                channel.enableVibration(true);
+                channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+                notificationManager.createNotificationChannel(channel);
+            }
+        }
     }
 
     public boolean checkHasStoragePermission() {

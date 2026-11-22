@@ -1951,9 +1951,24 @@ function untrackVillageNotificationId(villageId: string, notificationId: number)
   saveScheduledAlertsMap(map);
 }
 
+const MAX_SAFE_NOTIFICATION_ID = 2000000000;
+
 /**
- * Generates a deterministic positive 31-bit integer notification ID from villageId and slotKey
- * to prevent notification collisions across multiple village profiles and upgrade slots.
+ * Ensures any Android notification ID is strictly a valid positive 32-bit signed Java int
+ * bounded within [1, 2000000000] so Android AlarmManager/NotificationManager never drops it.
+ */
+function toSafeNotificationId(rawId: number): number {
+  if (!Number.isFinite(rawId)) return 1001;
+  const intId = Math.abs(Math.trunc(rawId));
+  if (intId >= 1 && intId <= MAX_SAFE_NOTIFICATION_ID) {
+    return intId;
+  }
+  return (intId % (MAX_SAFE_NOTIFICATION_ID - 1000)) + 1000;
+}
+
+/**
+ * Generates a deterministic positive 32-bit safe integer notification ID (1000..1999990999)
+ * from villageId and slotKey to prevent collisions and Java int overflow.
  */
 export function getSlotNotificationId(villageId: string, slotKey: string): number {
   const combined = `${villageId}::${slotKey}`;
@@ -1962,7 +1977,7 @@ export function getSlotNotificationId(villageId: string, slotKey: string): numbe
     hash ^= combined.charCodeAt(i);
     hash = Math.imul(hash, 16777619);
   }
-  return ((hash >>> 0) % 2147480000) + 1000;
+  return toSafeNotificationId(((hash >>> 0) % 1999990000) + 1000);
 }
 
 const NOTIFICATION_CHANNEL_ID = 'clash_alerts_v2';
@@ -2004,6 +2019,7 @@ export async function requestNotificationPermissions(): Promise<boolean> {
     return inFlightPermissionRequest;
   }
   inFlightPermissionRequest = (async () => {
+    await ensureDefaultNotificationChannel();
     let granted = false;
     try {
       const current = await LocalNotifications.checkPermissions();
@@ -2016,7 +2032,14 @@ export async function requestNotificationPermissions(): Promise<boolean> {
     } catch {
       // Ignore errors in web preview environments where native plugin is unavailable
     }
-    await ensureDefaultNotificationChannel();
+    if (!granted && Capacitor.isNativePlatform()) {
+      try {
+        const enabled = await LocalNotifications.areEnabled();
+        granted = enabled.value === true;
+      } catch {
+        // Ignore fallback error
+      }
+    }
     return granted;
   })();
 
@@ -2028,12 +2051,13 @@ export async function requestNotificationPermissions(): Promise<boolean> {
 }
 
 async function canUseExactAlarmsSafely(): Promise<boolean> {
-  if (!Capacitor.isNativePlatform()) return true;
+  if (!Capacitor.isNativePlatform()) return false;
   try {
     const exactStatus = await LocalNotifications.checkExactNotificationSetting();
     return exactStatus.exact_alarm === 'granted';
   } catch {
-    return true;
+    // Do NOT block or redirect to Settings if exact alarm check fails — fall back to inexact allowWhileIdle
+    return false;
   }
 }
 
@@ -2045,7 +2069,7 @@ function buildNativeNotificationPayload(params: {
   isExactNotification: boolean;
 }): LocalNotificationSchema {
   return {
-    id: params.id,
+    id: toSafeNotificationId(params.id),
     title: params.title,
     body: params.body,
     schedule: {
@@ -2056,7 +2080,32 @@ function buildNativeNotificationPayload(params: {
     smallIcon: NOTIFICATION_SMALL_ICON,
     foreground: true,
     isExactNotification: params.isExactNotification,
+    isExactMandatory: false,
   };
+}
+
+async function scheduleNotificationsWithFallback(
+  notifications: LocalNotificationSchema[]
+): Promise<void> {
+  if (notifications.length === 0) return;
+  await ensureDefaultNotificationChannel();
+  try {
+    await LocalNotifications.schedule({ notifications });
+  } catch {
+    // Never abort on exact alarm permission or channel rejection: retry as inexact + allowWhileIdle
+    const fallbackNotifications: LocalNotificationSchema[] = notifications.map((n) => ({
+      ...n,
+      id: toSafeNotificationId(n.id),
+      schedule: n.schedule ? { ...n.schedule, allowWhileIdle: true } : n.schedule,
+      isExactNotification: false,
+      isExactMandatory: false,
+    }));
+    try {
+      await LocalNotifications.schedule({ notifications: fallbackNotifications });
+    } catch {
+      // Ignore errors in non-native environments
+    }
+  }
 }
 
 async function cancelSlotNotification(villageId: string, slotKey: string): Promise<void> {
@@ -2080,7 +2129,7 @@ async function scheduleExactSlotNotification(params: {
 }): Promise<void> {
   return enqueueNotificationTask(async () => {
     const { villageId, slotKey, title, body, targetTimestamp } = params;
-    const uniqueNumericId = Math.abs(Math.trunc(getSlotNotificationId(villageId, slotKey))) || 1001;
+    const uniqueNumericId = getSlotNotificationId(villageId, slotKey);
 
     // Always clear any previously scheduled notification for this specific slot first
     try {
@@ -2089,35 +2138,28 @@ async function scheduleExactSlotNotification(params: {
       // Ignore errors in non-native environments
     }
 
-    const finishEpochMs = typeof targetTimestamp === 'number' ? Math.trunc(targetTimestamp) : 0;
+    const finishEpochMs =
+      typeof targetTimestamp === 'number' && Number.isFinite(targetTimestamp)
+        ? Math.trunc(targetTimestamp)
+        : 0;
     if (!finishEpochMs || finishEpochMs <= Date.now() + 1000) {
       untrackVillageNotificationId(villageId, uniqueNumericId);
       return;
     }
 
-    const granted = await requestNotificationPermissions();
-    if (!granted && Capacitor.isNativePlatform()) {
-      return;
-    }
-
+    await requestNotificationPermissions();
     const useExact = await canUseExactAlarmsSafely();
     trackVillageNotificationId(villageId, uniqueNumericId);
 
-    try {
-      await LocalNotifications.schedule({
-        notifications: [
-          buildNativeNotificationPayload({
-            id: uniqueNumericId,
-            title,
-            body,
-            finishEpochMs,
-            isExactNotification: useExact,
-          }),
-        ],
-      });
-    } catch {
-      // Ignore errors in non-native environments
-    }
+    await scheduleNotificationsWithFallback([
+      buildNativeNotificationPayload({
+        id: uniqueNumericId,
+        title,
+        body,
+        finishEpochMs,
+        isExactNotification: useExact,
+      }),
+    ]);
   });
 }
 
@@ -2132,7 +2174,7 @@ async function scheduleBuilderNotificationsForVillage(
     const idsToCancel: number[] = [];
 
     for (let idx = 0; idx < 7; idx++) {
-      const slotId = Math.abs(Math.trunc(getSlotNotificationId(villageId, `builder_${idx}`))) || 1001;
+      const slotId = getSlotNotificationId(villageId, `builder_${idx}`);
       idsToCancel.push(slotId);
       if (!activeIndices.has(idx)) {
         untrackVillageNotificationId(villageId, slotId);
@@ -2147,20 +2189,16 @@ async function scheduleBuilderNotificationsForVillage(
       // Ignore errors in non-native environments
     }
 
-    const granted = await requestNotificationPermissions();
-    if (!granted && Capacitor.isNativePlatform()) {
-      return;
-    }
-
+    await requestNotificationPermissions();
     const useExact = await canUseExactAlarmsSafely();
     const notificationsToSchedule: LocalNotificationSchema[] = [];
 
     for (const item of results) {
       const finishEpochMs =
-        typeof item.targetTimestamp === 'number' ? Math.trunc(item.targetTimestamp) : 0;
-      const uniqueNumericId =
-        Math.abs(Math.trunc(getSlotNotificationId(villageId, `builder_${item.builderIndex}`))) ||
-        1001;
+        typeof item.targetTimestamp === 'number' && Number.isFinite(item.targetTimestamp)
+          ? Math.trunc(item.targetTimestamp)
+          : 0;
+      const uniqueNumericId = getSlotNotificationId(villageId, `builder_${item.builderIndex}`);
       if (!finishEpochMs || finishEpochMs <= now + 1000) {
         untrackVillageNotificationId(villageId, uniqueNumericId);
         continue;
@@ -2180,15 +2218,7 @@ async function scheduleBuilderNotificationsForVillage(
       );
     }
 
-    if (notificationsToSchedule.length > 0) {
-      try {
-        await LocalNotifications.schedule({
-          notifications: notificationsToSchedule,
-        });
-      } catch {
-        // Ignore errors in non-native environments
-      }
-    }
+    await scheduleNotificationsWithFallback(notificationsToSchedule);
   });
 }
 
@@ -2327,7 +2357,11 @@ async function cancelAllNotificationsForVillageImmediate(villageId: string): Pro
     getSlotNotificationId(villageId, 'helper_lab'),
   ];
 
-  const uniqueIds = Array.from(new Set([...storedIds, ...deterministicSlotIds]));
+  const validStoredIds = storedIds.filter(
+    (id): id is number =>
+      typeof id === 'number' && Number.isInteger(id) && id >= 1 && id <= 2147483647
+  );
+  const uniqueIds = Array.from(new Set([...validStoredIds, ...deterministicSlotIds]));
   delete map[villageId];
   saveScheduledAlertsMap(map);
 
@@ -2424,10 +2458,7 @@ async function scheduleAllVillageNotificationsSinglePass(params: {
     await cancelAllNotificationsForVillageImmediate(villageId);
 
     // 2. Await notification permissions & ensure high-priority channel before scheduling
-    const granted = await requestNotificationPermissions();
-    if (!granted && Capacitor.isNativePlatform()) {
-      return;
-    }
+    await requestNotificationPermissions();
 
     const useExact = await canUseExactAlarmsSafely();
     const now = Date.now();
@@ -2439,9 +2470,12 @@ async function scheduleAllVillageNotificationsSinglePass(params: {
       body: string,
       finishEpochMs: number | null | undefined
     ) => {
-      const epochMs = typeof finishEpochMs === 'number' ? Math.trunc(finishEpochMs) : 0;
+      const epochMs =
+        typeof finishEpochMs === 'number' && Number.isFinite(finishEpochMs)
+          ? Math.trunc(finishEpochMs)
+          : 0;
       if (!epochMs || epochMs <= now + 1000) return;
-      const uniqueNumericId = Math.abs(Math.trunc(getSlotNotificationId(villageId, slotKey))) || 1001;
+      const uniqueNumericId = getSlotNotificationId(villageId, slotKey);
       trackVillageNotificationId(villageId, uniqueNumericId);
       notificationsToSchedule.push(
         buildNativeNotificationPayload({
@@ -2558,15 +2592,7 @@ async function scheduleAllVillageNotificationsSinglePass(params: {
       );
     }
 
-    if (notificationsToSchedule.length > 0) {
-      try {
-        await LocalNotifications.schedule({
-          notifications: notificationsToSchedule,
-        });
-      } catch {
-        // Ignore errors in non-native environments
-      }
-    }
+    await scheduleNotificationsWithFallback(notificationsToSchedule);
   });
 }
 
@@ -5462,8 +5488,8 @@ export default function App() {
   // - Immediately re-syncs against `Date.now()` and restarts when `document.hidden === false`.
   useEffect(() => {
     void (async () => {
-      const granted = await requestNotificationPermissions();
-      if (!granted || !Capacitor.isNativePlatform()) return;
+      await requestNotificationPermissions();
+      if (!Capacitor.isNativePlatform()) return;
       const stored = loadMultiAccountStorage();
       const startupNow = Date.now();
       for (const profile of stored.accounts) {
