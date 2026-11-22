@@ -2099,8 +2099,7 @@ async function scheduleNotificationsWithFallback(
       ...n,
       id: toSafeNotificationId(n.id),
       schedule: n.schedule ? { ...n.schedule, allowWhileIdle: true } : n.schedule,
-      isExactNotification: false,
-      isExactMandatory: false,
+      
     }));
     try {
       await LocalNotifications.schedule({ notifications: fallbackNotifications });
