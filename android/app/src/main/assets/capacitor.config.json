@@ -4,9 +4,8 @@
 	"webDir": "dist",
 	"plugins": {
 		"LocalNotifications": {
-			"smallIcon": "ic_launcher",
-			"iconColor": "#fbbf24",
-			"sound": "default"
+			"smallIcon": "ic_stat_clash",
+			"iconColor": "#fbbf24"
 		},
 		"StatusBar": {
 			"overlaysWebView": false,
