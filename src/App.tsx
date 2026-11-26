@@ -4,8 +4,6 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Capacitor } from '@capacitor/core';
-import { LocalNotifications, type LocalNotificationSchema } from '@capacitor/local-notifications';
 import {
   ITEM_NAMES_BY_ID,
   TownHallAssetImage,
@@ -24,6 +22,16 @@ import {
   type StandardUpgradeHistoryItem,
   type WallUpgradeHistoryItem,
 } from './components/FiveMonthUpgradeHistory';
+import {
+  ensureChannel,
+  getNotificationStatus,
+  getPendingAlarmCount,
+  isNativeNotificationPlatform,
+  scheduleTestAlarm,
+  syncAllNotifications,
+  type AccountSnapshot,
+  type NotificationStatusSnapshot,
+} from './services/notificationEngine';
 
 export const COC_NAMES: Record<string | number, string> = {
   // Town Hall & Key Buildings
@@ -345,7 +353,6 @@ interface RawCoCVillage {
 const STORAGE_KEY = 'coc_builder_potion_saved_v2';
 const LEGACY_STORAGE_KEY = 'coc_builder_potion_saved_v1';
 const ACCOUNTS_STORAGE_KEY = 'clash_planner_accounts_v1';
-const SCHEDULED_ALERTS_STORAGE_KEY = 'clashPlanner_scheduledAlerts';
 const TIMERS_COLLAPSED_STORAGE_KEY = 'clash_planner_timers_collapsed';
 
 interface MonthlySectionStats {
@@ -1913,692 +1920,112 @@ function computeNewlyCreditedBoostPotions(
   };
 }
 
-type ScheduledAlertsMap = Record<string, number[]>;
+function mapVillageProfilesToNotificationSnapshots(
+  profiles: VillageProfile[],
+  activeId: string,
+  liveActiveData: SavedState
+): AccountSnapshot[] {
+  return profiles.map((profile) => {
+    const d = profile.id === activeId ? liveActiveData : profile.data;
+    const locked = Array.isArray(d?.lockedResults) ? d.lockedResults : [];
+    const builderTimers = Array.isArray(d?.builders) ? d.builders : [];
 
-function loadScheduledAlertsMap(): ScheduledAlertsMap {
-  try {
-    const raw = localStorage.getItem(SCHEDULED_ALERTS_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return parsed as ScheduledAlertsMap;
-  } catch {
-    return {};
-  }
-}
-
-function saveScheduledAlertsMap(map: ScheduledAlertsMap): void {
-  try {
-    localStorage.setItem(SCHEDULED_ALERTS_STORAGE_KEY, JSON.stringify(map));
-  } catch {
-    // Ignore storage quota errors
-  }
-}
-
-function trackVillageNotificationId(villageId: string, notificationId: number): void {
-  const map = loadScheduledAlertsMap();
-  const list = Array.isArray(map[villageId]) ? map[villageId] : [];
-  if (!list.includes(notificationId)) {
-    map[villageId] = [...list, notificationId];
-    saveScheduledAlertsMap(map);
-  }
-}
-
-function untrackVillageNotificationId(villageId: string, notificationId: number): void {
-  const map = loadScheduledAlertsMap();
-  if (!Array.isArray(map[villageId])) return;
-  map[villageId] = map[villageId].filter((id) => id !== notificationId);
-  saveScheduledAlertsMap(map);
-}
-
-const MAX_SAFE_NOTIFICATION_ID = 2000000000;
-
-/**
- * Ensures any Android notification ID is strictly a valid positive 32-bit signed Java int
- * bounded within [1, 2000000000] so Android AlarmManager/NotificationManager never drops it.
- */
-function toSafeNotificationId(rawId: number): number {
-  if (!Number.isFinite(rawId)) return 1001;
-  const intId = Math.abs(Math.trunc(rawId));
-  if (intId >= 1 && intId <= MAX_SAFE_NOTIFICATION_ID) {
-    return intId;
-  }
-  return (intId % (MAX_SAFE_NOTIFICATION_ID - 1000)) + 1000;
-}
-
-/**
- * Generates a deterministic positive 32-bit safe integer notification ID (1000..1999990999)
- * from villageId and slotKey to prevent collisions and Java int overflow.
- */
-export function getSlotNotificationId(villageId: string, slotKey: string): number {
-  const combined = `${villageId}::${slotKey}`;
-  let hash = 2166136261;
-  for (let i = 0; i < combined.length; i++) {
-    hash ^= combined.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return toSafeNotificationId(((hash >>> 0) % 1999990000) + 1000);
-}
-
-const NOTIFICATION_CHANNEL_ID = 'clash_alerts_v2';
-const NOTIFICATION_SMALL_ICON = 'ic_stat_clash';
-
-let notificationChannelCreated = false;
-let inFlightPermissionRequest: Promise<boolean> | null = null;
-let notificationQueueTail: Promise<void> = Promise.resolve();
-
-function enqueueNotificationTask(task: () => Promise<void>): Promise<void> {
-  const run = notificationQueueTail.then(task, task);
-  notificationQueueTail = run.catch(() => {});
-  return run;
-}
-
-export async function ensureDefaultNotificationChannel(): Promise<void> {
-  if (notificationChannelCreated) return;
-  if (!Capacitor.isNativePlatform()) {
-    notificationChannelCreated = true;
-    return;
-  }
-  try {
-    await LocalNotifications.createChannel({
-      id: NOTIFICATION_CHANNEL_ID,
-      name: 'Upgrade Reminders',
-      description: 'Clash of Clans builder, laboratory, pet house, boost, and helper alerts',
-      importance: 4, // IMPORTANCE_HIGH: heads-up banner + system default sound + vibration
-      visibility: 1, // VISIBILITY_PUBLIC
-      vibration: true,
+    const builders = locked.map((item) => {
+      const matchingTimer = builderTimers[item.builderIndex];
+      const resolvedName =
+        (item.rawId ? resolveUpgradeName(item.rawId, '') : '') ||
+        (matchingTimer?.rawId ? resolveUpgradeName(matchingTimer.rawId, '') : '') ||
+        item.upgradeTitle ||
+        matchingTimer?.upgradeTitle ||
+        '';
+      const baseLvl =
+        typeof item.upgradeLevel === 'number'
+          ? item.upgradeLevel
+          : typeof matchingTimer?.upgradeLevel === 'number'
+          ? matchingTimer.upgradeLevel
+          : null;
+      return {
+        slotIndex: item.builderIndex,
+        name: resolvedName,
+        targetLevel: baseLvl !== null && Number.isFinite(baseLvl) ? baseLvl + 1 : null,
+        finishEpochMs: item.targetTimestamp,
+        remainingSeconds: matchingTimer ? getTimerTotalSeconds(matchingTimer) : undefined,
+        isActive: true,
+      };
     });
-    notificationChannelCreated = true;
-  } catch (err) {
-    console.error('[Notifications]', err);
-  }
-}
 
-export async function requestNotificationPermissions(): Promise<boolean> {
-  if (inFlightPermissionRequest) {
-    return inFlightPermissionRequest;
-  }
-  inFlightPermissionRequest = (async () => {
-    await ensureDefaultNotificationChannel();
-    let granted = false;
-    try {
-      const current = await LocalNotifications.checkPermissions();
-      if (current.display === 'granted') {
-        granted = true;
-      } else {
-        const requested = await LocalNotifications.requestPermissions();
-        granted = requested.display === 'granted';
-      }
-    } catch (err) {
-      console.error('[Notifications]', err);
-    }
-    if (!granted && Capacitor.isNativePlatform()) {
-      try {
-        const enabled = await LocalNotifications.areEnabled();
-        granted = enabled.value === true;
-      } catch (err) {
-        console.error('[Notifications]', err);
-      }
-    }
-    return granted;
-  })();
+    const labMainTimer = d?.labTimer;
+    const labMainName =
+      (labMainTimer?.rawId ? resolveUpgradeName(labMainTimer.rawId, '') : '') ||
+      labMainTimer?.upgradeTitle ||
+      '';
+    const labGoblinTimer = d?.goblinLabTimer;
+    const labGoblinName =
+      (labGoblinTimer?.rawId ? resolveUpgradeName(labGoblinTimer.rawId, '') : '') ||
+      labGoblinTimer?.upgradeTitle ||
+      '';
+    const petTimerVal = d?.petTimer;
+    const petName =
+      (petTimerVal?.rawId ? resolveUpgradeName(petTimerVal.rawId, '') : '') ||
+      petTimerVal?.upgradeTitle ||
+      '';
 
-  try {
-    return await inFlightPermissionRequest;
-  } finally {
-    inFlightPermissionRequest = null;
-  }
-}
-
-async function canUseExactAlarmsSafely(): Promise<boolean> {
-  if (!Capacitor.isNativePlatform()) return false;
-  try {
-    const exactStatus = await LocalNotifications.checkExactNotificationSetting();
-    return exactStatus.exact_alarm === 'granted';
-  } catch (err) {
-    console.error('[Notifications]', err);
-    // Do NOT block or redirect to Settings if exact alarm check fails — fall back to inexact allowWhileIdle
-    return false;
-  }
-}
-
-function buildNativeNotificationPayload(params: {
-  id: number;
-  title: string;
-  body: string;
-  finishEpochMs: number;
-  isExactNotification: boolean;
-}): LocalNotificationSchema {
-  return {
-    id: toSafeNotificationId(params.id),
-    title: params.title,
-    body: params.body,
-    schedule: {
-      at: new Date(params.finishEpochMs),
-      allowWhileIdle: true,
-    },
-    channelId: NOTIFICATION_CHANNEL_ID,
-    smallIcon: NOTIFICATION_SMALL_ICON,
-    
-    
-    
-  };
-}
-
-async function scheduleNotificationsWithFallback(
-  notifications: LocalNotificationSchema[]
-): Promise<void> {
-  if (notifications.length === 0) return;
-  await ensureDefaultNotificationChannel();
-  try {
-    await LocalNotifications.schedule({ notifications });
-  } catch (err) {
-    console.error('[Notifications]', err);
-    // Never abort on exact alarm permission or channel rejection: retry as inexact + allowWhileIdle
-    const fallbackNotifications: LocalNotificationSchema[] = notifications.map((n) => ({
-      ...n,
-      id: toSafeNotificationId(n.id),
-      schedule: n.schedule ? { ...n.schedule, allowWhileIdle: true } : n.schedule,
-      
-    }));
-    try {
-      await LocalNotifications.schedule({ notifications: fallbackNotifications });
-    } catch (fallbackErr) {
-      console.error('[Notifications]', fallbackErr);
-    }
-  }
-}
-
-async function cancelSlotNotification(villageId: string, slotKey: string): Promise<void> {
-  return enqueueNotificationTask(async () => {
-    const notificationId = getSlotNotificationId(villageId, slotKey);
-    untrackVillageNotificationId(villageId, notificationId);
-    try {
-      await LocalNotifications.cancel({ notifications: [{ id: notificationId }] });
-    } catch (err) {
-      console.error('[Notifications]', err);
-    }
-  });
-}
-
-async function scheduleExactSlotNotification(params: {
-  villageId: string;
-  slotKey: string;
-  title: string;
-  body: string;
-  targetTimestamp: number | null | undefined;
-}): Promise<void> {
-  return enqueueNotificationTask(async () => {
-    const { villageId, slotKey, title, body, targetTimestamp } = params;
-    const uniqueNumericId = getSlotNotificationId(villageId, slotKey);
-
-    // Always clear any previously scheduled notification for this specific slot first
-    try {
-      await LocalNotifications.cancel({ notifications: [{ id: uniqueNumericId }] });
-    } catch (err) {
-      console.error('[Notifications]', err);
-    }
-
-    const finishEpochMs =
-      typeof targetTimestamp === 'number' && Number.isFinite(targetTimestamp)
-        ? Math.trunc(targetTimestamp)
-        : 0;
-    if (!finishEpochMs || finishEpochMs <= Date.now() + 1000) {
-      untrackVillageNotificationId(villageId, uniqueNumericId);
-      return;
-    }
-
-    await requestNotificationPermissions();
-    const useExact = await canUseExactAlarmsSafely();
-    trackVillageNotificationId(villageId, uniqueNumericId);
-
-    await scheduleNotificationsWithFallback([
-      buildNativeNotificationPayload({
-        id: uniqueNumericId,
-        title,
-        body,
-        finishEpochMs,
-        isExactNotification: useExact,
-      }),
-    ]);
-  });
-}
-
-async function scheduleBuilderNotificationsForVillage(
-  villageId: string,
-  villageName: string,
-  results: LockedResultItem[]
-): Promise<void> {
-  return enqueueNotificationTask(async () => {
-    const now = Date.now();
-    const activeIndices = new Set(results.map((r) => r.builderIndex));
-    const idsToCancel: number[] = [];
-
-    for (let idx = 0; idx < 7; idx++) {
-      const slotId = getSlotNotificationId(villageId, `builder_${idx}`);
-      idsToCancel.push(slotId);
-      if (!activeIndices.has(idx)) {
-        untrackVillageNotificationId(villageId, slotId);
-      }
-    }
-
-    try {
-      await LocalNotifications.cancel({
-        notifications: idsToCancel.map((id) => ({ id })),
-      });
-    } catch (err) {
-      console.error('[Notifications]', err);
-    }
-
-    await requestNotificationPermissions();
-    const useExact = await canUseExactAlarmsSafely();
-    const notificationsToSchedule: LocalNotificationSchema[] = [];
-
-    for (const item of results) {
-      const finishEpochMs =
-        typeof item.targetTimestamp === 'number' && Number.isFinite(item.targetTimestamp)
-          ? Math.trunc(item.targetTimestamp)
-          : 0;
-      const uniqueNumericId = getSlotNotificationId(villageId, `builder_${item.builderIndex}`);
-      if (!finishEpochMs || finishEpochMs <= now + 1000) {
-        untrackVillageNotificationId(villageId, uniqueNumericId);
-        continue;
-      }
-      const buildingName = item.upgradeTitle || `Builder ${item.builderIndex + 1} Upgrade`;
-      const currentLvl = typeof item.upgradeLevel === 'number' ? item.upgradeLevel : 0;
-      const targetLvl = currentLvl + 1;
-      trackVillageNotificationId(villageId, uniqueNumericId);
-      notificationsToSchedule.push(
-        buildNativeNotificationPayload({
-          id: uniqueNumericId,
-          title: `🔨 Builder Alert • ${villageName}`,
-          body: `${villageName}: ${buildingName} (LVL ${targetLvl}) upgrade completed! Builder is now free.`,
-          finishEpochMs,
-          isExactNotification: useExact,
-        })
-      );
-    }
-
-    await scheduleNotificationsWithFallback(notificationsToSchedule);
-  });
-}
-
-async function scheduleLabNotificationsForVillage(
-  villageId: string,
-  villageName: string,
-  mainTimer: BuilderTime,
-  mainTargetTs: number | null,
-  goblinTimer: BuilderTime,
-  goblinTargetTs: number | null
-): Promise<void> {
-  if (mainTargetTs && getTimerTotalSeconds(mainTimer) > 0) {
-    const troopSpellName = resolveUpgradeName(
-      mainTimer.rawId,
-      mainTimer.upgradeTitle || 'Troop / Spell Upgrade'
-    );
-    const targetLvl =
-      typeof mainTimer.upgradeLevel === 'number' ? mainTimer.upgradeLevel + 1 : 1;
-    await scheduleExactSlotNotification({
-      villageId,
-      slotKey: 'lab_main',
-      title: `⚗️ Laboratory Alert • ${villageName}`,
-      body: `${villageName}: ${troopSpellName} (LVL ${targetLvl}) research finished!`,
-      targetTimestamp: mainTargetTs,
-    });
-  } else {
-    await cancelSlotNotification(villageId, 'lab_main');
-  }
-
-  if (goblinTargetTs && getTimerTotalSeconds(goblinTimer) > 0) {
-    const goblinTroopSpellName = resolveUpgradeName(
-      goblinTimer.rawId,
-      goblinTimer.upgradeTitle || 'Goblin Researcher'
-    );
-    const goblinTargetLvl =
-      typeof goblinTimer.upgradeLevel === 'number' ? goblinTimer.upgradeLevel + 1 : 1;
-    await scheduleExactSlotNotification({
-      villageId,
-      slotKey: 'lab_goblin',
-      title: `⚗️ Laboratory Alert • ${villageName}`,
-      body: `${villageName}: ${goblinTroopSpellName} (LVL ${goblinTargetLvl}) research finished!`,
-      targetTimestamp: goblinTargetTs,
-    });
-  } else {
-    await cancelSlotNotification(villageId, 'lab_goblin');
-  }
-}
-
-async function schedulePetNotificationForVillage(
-  villageId: string,
-  villageName: string,
-  petTimerVal: BuilderTime,
-  targetPetFinishTimestamp: number | null
-): Promise<void> {
-  if (targetPetFinishTimestamp && getTimerTotalSeconds(petTimerVal) > 0) {
-    const petName = resolveUpgradeName(
-      petTimerVal.rawId,
-      petTimerVal.upgradeTitle || 'Active Pet Upgrade'
-    );
-    const targetPetLvl =
-      typeof petTimerVal.upgradeLevel === 'number' ? petTimerVal.upgradeLevel + 1 : 1;
-    await scheduleExactSlotNotification({
-      villageId,
-      slotKey: 'pet_main',
-      title: `🐾 Pet House Alert • ${villageName}`,
-      body: `${villageName}: ${petName} (LVL ${targetPetLvl}) upgrade is complete! Pet is ready for battle.`,
-      targetTimestamp: targetPetFinishTimestamp,
-    });
-  } else {
-    await cancelSlotNotification(villageId, 'pet_main');
-  }
-}
-
-async function scheduleBoostExpiryNotificationsForVillage(
-  villageId: string,
-  villageName: string,
-  builderBoostEndTime: number | null | undefined,
-  labBoostEndTime: number | null | undefined,
-  petBoostEndTime: number | null | undefined
-): Promise<void> {
-  if (builderBoostEndTime && builderBoostEndTime > Date.now() + 1000) {
-    await scheduleExactSlotNotification({
-      villageId,
-      slotKey: 'boost_builder',
-      title: `⚡ Builder Boost Expired • ${villageName}`,
-      body: `${villageName}: Builder Potion boost has ended! Upgrades are back to normal speed.`,
-      targetTimestamp: builderBoostEndTime,
-    });
-  } else {
-    await cancelSlotNotification(villageId, 'boost_builder');
-  }
-
-  if (labBoostEndTime && labBoostEndTime > Date.now() + 1000) {
-    await scheduleExactSlotNotification({
-      villageId,
-      slotKey: 'boost_lab',
-      title: `⚡ Lab Boost Expired • ${villageName}`,
-      body: `${villageName}: Research Potion boost has ended!`,
-      targetTimestamp: labBoostEndTime,
-    });
-  } else {
-    await cancelSlotNotification(villageId, 'boost_lab');
-  }
-
-  if (petBoostEndTime && petBoostEndTime > Date.now() + 1000) {
-    await scheduleExactSlotNotification({
-      villageId,
-      slotKey: 'boost_pet',
-      title: `⚡ Pet Boost Expired • ${villageName}`,
-      body: `${villageName}: Pet Potion boost has ended!`,
-      targetTimestamp: petBoostEndTime,
-    });
-  } else {
-    await cancelSlotNotification(villageId, 'boost_pet');
-  }
-}
-
-async function cancelAllNotificationsForVillageImmediate(villageId: string): Promise<void> {
-  const map = loadScheduledAlertsMap();
-  const storedIds = Array.isArray(map[villageId]) ? map[villageId] : [];
-  const deterministicSlotIds = [
-    getSlotNotificationId(villageId, 'builder_0'),
-    getSlotNotificationId(villageId, 'builder_1'),
-    getSlotNotificationId(villageId, 'builder_2'),
-    getSlotNotificationId(villageId, 'builder_3'),
-    getSlotNotificationId(villageId, 'builder_4'),
-    getSlotNotificationId(villageId, 'builder_5'),
-    getSlotNotificationId(villageId, 'builder_6'),
-    getSlotNotificationId(villageId, 'lab_main'),
-    getSlotNotificationId(villageId, 'lab_goblin'),
-    getSlotNotificationId(villageId, 'pet_main'),
-    getSlotNotificationId(villageId, 'boost_builder'),
-    getSlotNotificationId(villageId, 'boost_lab'),
-    getSlotNotificationId(villageId, 'boost_pet'),
-    getSlotNotificationId(villageId, 'helper_builder'),
-    getSlotNotificationId(villageId, 'helper_lab'),
-  ];
-
-  const validStoredIds = storedIds.filter(
-    (id): id is number =>
-      typeof id === 'number' && Number.isInteger(id) && id >= 1 && id <= 2147483647
-  );
-  const uniqueIds = Array.from(new Set([...validStoredIds, ...deterministicSlotIds]));
-  delete map[villageId];
-  saveScheduledAlertsMap(map);
-
-  if (uniqueIds.length > 0) {
-    try {
-      await LocalNotifications.cancel({
-        notifications: uniqueIds.map((id) => ({ id })),
-      });
-    } catch (err) {
-      console.error('[Notifications]', err);
-    }
-  }
-}
-
-async function cancelAllNotificationsForVillage(villageId: string): Promise<void> {
-  return enqueueNotificationTask(() => cancelAllNotificationsForVillageImmediate(villageId));
-}
-
-export function getHelperAvailableNotificationTimestamp(params: {
-  helper:
-    | {
-        assignedSlot: number | 'main' | 'goblin' | null;
-        activeSessionEndTime: number | null;
-        cooldownEndTime: number | null;
-        recurrent?: boolean;
-      }
-    | null
-    | undefined;
-  assignedUpgradeFinishTimestamp: number | null | undefined;
-  now?: number;
-}): number | null {
-  const { helper, assignedUpgradeFinishTimestamp, now = Date.now() } = params;
-  if (!helper || !helper.cooldownEndTime || helper.cooldownEndTime <= now + 1000) {
-    return null;
-  }
-
-  // If the helper is assigned until the upgrade finishes (recurrent !== false)
-  // and the assigned upgrade is still running when cooldown ends, do NOT send a daily notification.
-  const isAssignedRecurrent =
-    helper.assignedSlot !== null &&
-    helper.assignedSlot !== undefined &&
-    helper.recurrent !== false;
-
-  if (
-    isAssignedRecurrent &&
-    typeof assignedUpgradeFinishTimestamp === 'number' &&
-    assignedUpgradeFinishTimestamp > now
-  ) {
-    if (helper.cooldownEndTime > assignedUpgradeFinishTimestamp) {
-      return helper.cooldownEndTime;
-    }
-    return null;
-  }
-
-  // Helper is not assigned to an active upgrade (or not recurrent) -> notify when cooldown ends
-  return helper.cooldownEndTime;
-}
-
-async function scheduleAllVillageNotificationsSinglePass(params: {
-  villageId: string;
-  villageName: string;
-  builderResults: LockedResultItem[];
-  labMainTimer: BuilderTime;
-  labMainTargetTs: number | null;
-  labGoblinTimer: BuilderTime;
-  labGoblinTargetTs: number | null;
-  petTimerVal: BuilderTime;
-  petTargetTs: number | null;
-  builderBoostEndTime: number | null;
-  labBoostEndTime: number | null;
-  petBoostEndTime: number | null;
-  builderHelperCooldownEndTime?: number | null;
-  labHelperCooldownEndTime?: number | null;
-}): Promise<void> {
-  return enqueueNotificationTask(async () => {
-    const {
-      villageId,
-      villageName,
-      builderResults,
-      labMainTimer,
-      labMainTargetTs,
-      labGoblinTimer,
-      labGoblinTargetTs,
-      petTimerVal,
-      petTargetTs,
-      builderBoostEndTime,
-      labBoostEndTime,
-      petBoostEndTime,
-      builderHelperCooldownEndTime,
-      labHelperCooldownEndTime,
-    } = params;
-
-    // 1. Cancel pending alarms once for this village before scheduling fresh alarms
-    await cancelAllNotificationsForVillageImmediate(villageId);
-
-    // 2. Await notification permissions & ensure high-priority channel before scheduling
-    await requestNotificationPermissions();
-
-    const useExact = await canUseExactAlarmsSafely();
-    const now = Date.now();
-    const notificationsToSchedule: LocalNotificationSchema[] = [];
-
-    const addExactAlarm = (
-      slotKey: string,
-      title: string,
-      body: string,
-      finishEpochMs: number | null | undefined
-    ) => {
-      const epochMs =
-        typeof finishEpochMs === 'number' && Number.isFinite(finishEpochMs)
-          ? Math.trunc(finishEpochMs)
-          : 0;
-      if (!epochMs || epochMs <= now + 1000) return;
-      const uniqueNumericId = getSlotNotificationId(villageId, slotKey);
-      trackVillageNotificationId(villageId, uniqueNumericId);
-      notificationsToSchedule.push(
-        buildNativeNotificationPayload({
-          id: uniqueNumericId,
-          title,
-          body,
-          finishEpochMs: epochMs,
-          isExactNotification: useExact,
-        })
-      );
+    return {
+      id: profile.id,
+      name: profile.name,
+      builders,
+      labMain: labMainTimer
+        ? {
+            name: labMainName,
+            targetLevel:
+              typeof labMainTimer.upgradeLevel === 'number'
+                ? labMainTimer.upgradeLevel + 1
+                : null,
+            finishEpochMs: d?.targetLabTimestamp ?? null,
+            remainingSeconds: getTimerTotalSeconds(labMainTimer),
+          }
+        : null,
+      labGoblin: labGoblinTimer
+        ? {
+            name: labGoblinName,
+            targetLevel:
+              typeof labGoblinTimer.upgradeLevel === 'number'
+                ? labGoblinTimer.upgradeLevel + 1
+                : null,
+            finishEpochMs: d?.targetGoblinLabTimestamp ?? null,
+            remainingSeconds: getTimerTotalSeconds(labGoblinTimer),
+          }
+        : null,
+      petMain: petTimerVal
+        ? {
+            name: petName,
+            targetLevel:
+              typeof petTimerVal.upgradeLevel === 'number'
+                ? petTimerVal.upgradeLevel + 1
+                : null,
+            finishEpochMs: d?.targetPetTimestamp ?? null,
+            remainingSeconds: getTimerTotalSeconds(petTimerVal),
+          }
+        : null,
+      builderBoostEndTime: d?.builderBoostEndTime ?? null,
+      labBoostEndTime: d?.labBoostEndTime ?? null,
+      petBoostEndTime: d?.petBoostEndTime ?? null,
+      builderHelper: d?.builderApprentice
+        ? {
+            assignedSlot: d.builderApprentice.assignedSlot,
+            cooldownEndTime: d.builderApprentice.cooldownEndTime,
+            recurrent: d.builderApprentice.recurrent,
+          }
+        : null,
+      labHelper: d?.labApprentice
+        ? {
+            assignedSlot: d.labApprentice.assignedSlot,
+            cooldownEndTime: d.labApprentice.cooldownEndTime,
+            recurrent: d.labApprentice.recurrent,
+          }
+        : null,
     };
-
-    for (const item of builderResults) {
-      const buildingName = item.upgradeTitle || `Builder ${item.builderIndex + 1} Upgrade`;
-      const currentLvl = typeof item.upgradeLevel === 'number' ? item.upgradeLevel : 0;
-      const targetLvl = currentLvl + 1;
-      addExactAlarm(
-        `builder_${item.builderIndex}`,
-        `🔨 Builder Alert • ${villageName}`,
-        `${villageName}: ${buildingName} (LVL ${targetLvl}) upgrade completed! Builder is now free.`,
-        item.targetTimestamp
-      );
-    }
-
-    if (labMainTargetTs && getTimerTotalSeconds(labMainTimer) > 0) {
-      const troopSpellName = resolveUpgradeName(
-        labMainTimer.rawId,
-        labMainTimer.upgradeTitle || 'Troop / Spell Upgrade'
-      );
-      const targetLvl =
-        typeof labMainTimer.upgradeLevel === 'number' ? labMainTimer.upgradeLevel + 1 : 1;
-      addExactAlarm(
-        'lab_main',
-        `⚗️ Laboratory Alert • ${villageName}`,
-        `${villageName}: ${troopSpellName} (LVL ${targetLvl}) research finished!`,
-        labMainTargetTs
-      );
-    }
-
-    if (labGoblinTargetTs && getTimerTotalSeconds(labGoblinTimer) > 0) {
-      const goblinTroopSpellName = resolveUpgradeName(
-        labGoblinTimer.rawId,
-        labGoblinTimer.upgradeTitle || 'Goblin Researcher'
-      );
-      const goblinTargetLvl =
-        typeof goblinTimerLvlSafe(labGoblinTimer) === 'number'
-          ? (goblinTimerLvlSafe(labGoblinTimer) as number) + 1
-          : 1;
-      addExactAlarm(
-        'lab_goblin',
-        `⚗️ Laboratory Alert • ${villageName}`,
-        `${villageName}: ${goblinTroopSpellName} (LVL ${goblinTargetLvl}) research finished!`,
-        labGoblinTargetTs
-      );
-    }
-
-    if (petTargetTs && getTimerTotalSeconds(petTimerVal) > 0) {
-      const petName = resolveUpgradeName(
-        petTimerVal.rawId,
-        petTimerVal.upgradeTitle || 'Active Pet Upgrade'
-      );
-      const targetPetLvl =
-        typeof petTimerVal.upgradeLevel === 'number' ? petTimerVal.upgradeLevel + 1 : 1;
-      addExactAlarm(
-        'pet_main',
-        `🐾 Pet House Alert • ${villageName}`,
-        `${villageName}: ${petName} (LVL ${targetPetLvl}) upgrade is complete! Pet is ready for battle.`,
-        petTargetTs
-      );
-    }
-
-    if (builderBoostEndTime && builderBoostEndTime > now + 1000) {
-      addExactAlarm(
-        'boost_builder',
-        `⚡ Builder Boost Expired • ${villageName}`,
-        `${villageName}: Builder Potion boost has ended! Upgrades are back to normal speed.`,
-        builderBoostEndTime
-      );
-    }
-
-    if (labBoostEndTime && labBoostEndTime > now + 1000) {
-      addExactAlarm(
-        'boost_lab',
-        `⚡ Lab Boost Expired • ${villageName}`,
-        `${villageName}: Research Potion boost has ended!`,
-        labBoostEndTime
-      );
-    }
-
-    if (petBoostEndTime && petBoostEndTime > now + 1000) {
-      addExactAlarm(
-        'boost_pet',
-        `⚡ Pet Boost Expired • ${villageName}`,
-        `${villageName}: Pet Potion boost has ended!`,
-        petBoostEndTime
-      );
-    }
-
-    if (builderHelperCooldownEndTime && builderHelperCooldownEndTime > now + 1000) {
-      addExactAlarm(
-        'helper_builder',
-        `👷 Builder Helper Available • ${villageName}`,
-        `${villageName}: Builder's Apprentice cooldown has ended and is ready to assign!`,
-        builderHelperCooldownEndTime
-      );
-    }
-
-    if (labHelperCooldownEndTime && labHelperCooldownEndTime > now + 1000) {
-      addExactAlarm(
-        'helper_lab',
-        `🔬 Lab Helper Available • ${villageName}`,
-        `${villageName}: Lab Apprentice cooldown has ended and is ready to assign!`,
-        labHelperCooldownEndTime
-      );
-    }
-
-    await scheduleNotificationsWithFallback(notificationsToSchedule);
   });
-}
-
-function goblinTimerLvlSafe(t: BuilderTime): number | undefined {
-  return typeof t.upgradeLevel === 'number' ? t.upgradeLevel : undefined;
 }
 
 function createEmptyTimer(): BuilderTime {
@@ -5228,6 +4655,13 @@ export default function App() {
   const [jsonInputText, setJsonInputText] = useState<string>('');
   const [isBackupModalOpen, setIsBackupModalOpen] = useState<boolean>(false);
   const [backupRestoreInput, setBackupRestoreInput] = useState<string>('');
+  const [pendingAlarmCount, setPendingAlarmCount] = useState<number | null>(null);
+  const [notificationStatus, setNotificationStatus] = useState<NotificationStatusSnapshot>(() =>
+    getNotificationStatus()
+  );
+  const [testAlarmConfirmText, setTestAlarmConfirmText] = useState<string | null>(null);
+  const [isRefreshingAlarms, setIsRefreshingAlarms] = useState<boolean>(false);
+  const [isSchedulingTestAlarm, setIsSchedulingTestAlarm] = useState<boolean>(false);
   const [isWidgetPreviewOpen, setIsWidgetPreviewOpen] = useState<boolean>(false);
   const [widgetPreviewIdx, setWidgetPreviewIdx] = useState<number>(0);
   const [widgetRefreshTime, setWidgetRefreshTime] = useState<number>(() => Date.now());
@@ -5488,53 +4922,6 @@ export default function App() {
   // - Immediately clears/pauses when `document.hidden === true` (zero background CPU/battery drain).
   // - Immediately re-syncs against `Date.now()` and restarts when `document.hidden === false`.
   useEffect(() => {
-    void (async () => {
-      await requestNotificationPermissions();
-      if (!Capacitor.isNativePlatform()) return;
-      const stored = loadMultiAccountStorage();
-      const startupNow = Date.now();
-      for (const profile of stored.accounts) {
-        const d = profile.data;
-        if (!d) continue;
-        const bResults = d.lockedResults || [];
-        const assignedBuilderFinishTs =
-          d.builderApprentice?.assignedSlot !== null &&
-          d.builderApprentice?.assignedSlot !== undefined
-            ? bResults.find((r) => r.builderIndex === d.builderApprentice?.assignedSlot)
-                ?.targetTimestamp ?? null
-            : null;
-        const assignedLabFinishTs =
-          d.labApprentice?.assignedSlot === 'main'
-            ? d.targetLabTimestamp ?? null
-            : d.labApprentice?.assignedSlot === 'goblin'
-            ? d.targetGoblinLabTimestamp ?? null
-            : null;
-        await scheduleAllVillageNotificationsSinglePass({
-          villageId: profile.id,
-          villageName: profile.name,
-          builderResults: bResults,
-          labMainTimer: d.labTimer || createEmptyTimer(),
-          labMainTargetTs: d.targetLabTimestamp ?? null,
-          labGoblinTimer: d.goblinLabTimer || createEmptyTimer(),
-          labGoblinTargetTs: d.targetGoblinLabTimestamp ?? null,
-          petTimerVal: d.petTimer || createEmptyTimer(),
-          petTargetTs: d.targetPetTimestamp ?? null,
-          builderBoostEndTime: d.builderBoostEndTime ?? null,
-          labBoostEndTime: d.labBoostEndTime ?? null,
-          petBoostEndTime: d.petBoostEndTime ?? null,
-          builderHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-            helper: d.builderApprentice,
-            assignedUpgradeFinishTimestamp: assignedBuilderFinishTs,
-            now: startupNow,
-          }),
-          labHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-            helper: d.labApprentice,
-            assignedUpgradeFinishTimestamp: assignedLabFinishTs,
-            now: startupNow,
-          }),
-        });
-      }
-    })();
     setTimersCollapsedState(true);
 
     let masterIntervalId: number | null = null;
@@ -5738,6 +5125,162 @@ export default function App() {
     lastSynced,
   ]);
 
+  // Keep latest notification snapshots mapped from single source of truth (accounts + active live state)
+  const latestNotificationSnapshotsRef = useRef<AccountSnapshot[]>([]);
+  const hasRunInitialNotificationSyncRef = useRef<boolean>(false);
+
+  const liveActiveNotificationData: SavedState = {
+    mode: currentMode,
+    numBuilders,
+    builders,
+    potions: potionsInput,
+    lockedResults,
+    lockedSavedText: savedText,
+    researchPotions,
+    labTimer,
+    goblinLabTimer,
+    targetLabTimestamp,
+    labFormattedDate,
+    labSavedText,
+    targetGoblinLabTimestamp,
+    goblinLabFormattedDate,
+    petPotions,
+    petTimer,
+    targetPetTimestamp,
+    petFormattedDate,
+    petSavedText,
+    builderBoostEndTime,
+    labBoostEndTime,
+    petBoostEndTime,
+    builderBiteEndTime,
+    studySoupEndTime,
+    builderApprentice,
+    labApprentice,
+    thLevel,
+    lastSynced,
+  };
+  latestNotificationSnapshotsRef.current = mapVillageProfilesToNotificationSnapshots(
+    accounts,
+    activeAccountId,
+    liveActiveNotificationData
+  );
+
+  // Sync once on launch after initial accounts have loaded
+  useEffect(() => {
+    if (!isNativeNotificationPlatform()) return;
+    const snapshots = latestNotificationSnapshotsRef.current;
+    if (snapshots.length === 0) return;
+    void syncAllNotifications(snapshots).then(() => {
+      setNotificationStatus(getNotificationStatus());
+    });
+  }, []);
+
+  // Single debounced (~500ms) sync whenever accounts or any upgrade/boost/helper data changes
+  useEffect(() => {
+    if (!hasRunInitialNotificationSyncRef.current) {
+      hasRunInitialNotificationSyncRef.current = true;
+      return;
+    }
+    if (!isNativeNotificationPlatform() || isEditingTimers) return;
+    const snapshots = latestNotificationSnapshotsRef.current;
+    if (snapshots.length === 0) return;
+
+    const timerId = window.setTimeout(() => {
+      void syncAllNotifications(latestNotificationSnapshotsRef.current).then(() => {
+        setNotificationStatus(getNotificationStatus());
+      });
+    }, 500);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [
+    isEditingTimers,
+    accounts,
+    activeAccountId,
+    builders,
+    lockedResults,
+    labTimer,
+    goblinLabTimer,
+    targetLabTimestamp,
+    targetGoblinLabTimestamp,
+    petTimer,
+    targetPetTimestamp,
+    builderBoostEndTime,
+    labBoostEndTime,
+    petBoostEndTime,
+    builderApprentice,
+    labApprentice,
+  ]);
+
+  // Native-only resume sync on visibilitychange + window focus (isolated from Master Tick Interval)
+  useEffect(() => {
+    if (!isNativeNotificationPlatform()) return;
+    let lastResumeSyncTs = 0;
+
+    const triggerResumeNotificationSync = () => {
+      if (document.hidden) return;
+      const now = Date.now();
+      if (now - lastResumeSyncTs < 800) return;
+      lastResumeSyncTs = now;
+      const snapshots = latestNotificationSnapshotsRef.current;
+      if (snapshots.length === 0) return;
+      void ensureChannel()
+        .then(() => syncAllNotifications(snapshots))
+        .then(() => {
+          setNotificationStatus(getNotificationStatus());
+        });
+    };
+
+    document.addEventListener('visibilitychange', triggerResumeNotificationSync);
+    window.addEventListener('focus', triggerResumeNotificationSync);
+    return () => {
+      document.removeEventListener('visibilitychange', triggerResumeNotificationSync);
+      window.removeEventListener('focus', triggerResumeNotificationSync);
+    };
+  }, []);
+
+  const refreshNotificationDiagnostics = useCallback(async () => {
+    if (!isNativeNotificationPlatform()) return;
+    setIsRefreshingAlarms(true);
+    try {
+      const count = await getPendingAlarmCount();
+      setPendingAlarmCount(count);
+      setNotificationStatus(getNotificationStatus());
+    } finally {
+      setIsRefreshingAlarms(false);
+    }
+  }, []);
+
+  const handleScheduleTestAlarm = useCallback(async () => {
+    if (!isNativeNotificationPlatform() || isSchedulingTestAlarm) return;
+    triggerHaptic(15);
+    setIsSchedulingTestAlarm(true);
+    try {
+      const scheduledAt = await scheduleTestAlarm();
+      const count = await getPendingAlarmCount();
+      setPendingAlarmCount(count);
+      setNotificationStatus(getNotificationStatus());
+      if (scheduledAt) {
+        const hh = String(scheduledAt.getHours()).padStart(2, '0');
+        const mm = String(scheduledAt.getMinutes()).padStart(2, '0');
+        setTestAlarmConfirmText(`Alarm set for ${hh}:${mm}`);
+      } else {
+        setTestAlarmConfirmText(null);
+      }
+    } finally {
+      setIsSchedulingTestAlarm(false);
+    }
+  }, [isSchedulingTestAlarm]);
+
+  useEffect(() => {
+    if (isBackupModalOpen && isNativeNotificationPlatform()) {
+      void refreshNotificationDiagnostics();
+    } else if (!isBackupModalOpen) {
+      setTestAlarmConfirmText(null);
+    }
+  }, [isBackupModalOpen, refreshNotificationDiagnostics]);
+
   // Switch between village profiles when tapping an account pill (pencil icon is isolated)
   const handleAccountChipClick = (account: VillageProfile) => {
     triggerHaptic(15);
@@ -5770,68 +5313,6 @@ export default function App() {
       return;
     }
 
-    const targetAccount = accounts.find((acc) => acc.id === renamingAccountId);
-    if (targetAccount) {
-      const accData =
-        renamingAccountId === activeAccountId
-          ? {
-              ...targetAccount.data,
-              lockedResults,
-              labTimer,
-              goblinLabTimer,
-              targetLabTimestamp,
-              targetGoblinLabTimestamp,
-              petTimer,
-              targetPetTimestamp,
-            }
-          : targetAccount.data;
-
-      const bResults = accData.lockedResults || [];
-      const bHelper = renamingAccountId === activeAccountId ? builderApprentice : accData.builderApprentice;
-      const lHelper = renamingAccountId === activeAccountId ? labApprentice : accData.labApprentice;
-      const assignedBuilderFinishTs =
-        bHelper?.assignedSlot !== null && bHelper?.assignedSlot !== undefined
-          ? bResults.find((r) => r.builderIndex === bHelper.assignedSlot)?.targetTimestamp ?? null
-          : null;
-      const assignedLabFinishTs =
-        lHelper?.assignedSlot === 'main'
-          ? accData.targetLabTimestamp ?? null
-          : lHelper?.assignedSlot === 'goblin'
-          ? accData.targetGoblinLabTimestamp ?? null
-          : null;
-      void scheduleAllVillageNotificationsSinglePass({
-        villageId: renamingAccountId,
-        villageName: trimmed,
-        builderResults: bResults,
-        labMainTimer: accData.labTimer || createEmptyTimer(),
-        labMainTargetTs: accData.targetLabTimestamp ?? null,
-        labGoblinTimer: accData.goblinLabTimer || createEmptyTimer(),
-        labGoblinTargetTs: accData.targetGoblinLabTimestamp ?? null,
-        petTimerVal: accData.petTimer || createEmptyTimer(),
-        petTargetTs: accData.targetPetTimestamp ?? null,
-        builderBoostEndTime:
-          renamingAccountId === activeAccountId
-            ? builderBoostEndTime
-            : accData.builderBoostEndTime ?? null,
-        labBoostEndTime:
-          renamingAccountId === activeAccountId
-            ? labBoostEndTime
-            : accData.labBoostEndTime ?? null,
-        petBoostEndTime:
-          renamingAccountId === activeAccountId
-            ? petBoostEndTime
-            : accData.petBoostEndTime ?? null,
-        builderHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-          helper: bHelper,
-          assignedUpgradeFinishTimestamp: assignedBuilderFinishTs,
-        }),
-        labHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-          helper: lHelper,
-          assignedUpgradeFinishTimestamp: assignedLabFinishTs,
-        }),
-      });
-    }
-
     setAccounts((prev) => {
       const updated = prev.map((acc) =>
         acc.id === renamingAccountId ? { ...acc, name: trimmed } : acc
@@ -5860,7 +5341,6 @@ export default function App() {
     if (!renamingAccountId) return;
 
     const villageIdToDelete = renamingAccountId;
-    void cancelAllNotificationsForVillage(villageIdToDelete);
 
     const targetIndex = accounts.findIndex((a) => a.id === villageIdToDelete);
     const deletedName =
@@ -6256,11 +5736,11 @@ export default function App() {
     mainTimerVal: BuilderTime,
     goblinTimerVal: BuilderTime,
     potionCount: number,
-    targetVillageId: string = activeAccountId,
-    targetVillageName: string = getActiveVillageName(activeAccountId),
+    _targetVillageId: string = activeAccountId,
+    _targetVillageName: string = getActiveVillageName(activeAccountId),
     overrideLabBoostSeconds?: number,
     overrideLabHelper?: LabApprenticeState,
-    skipNotifications = false,
+    _skipNotifications = false,
     overrideStudySoupSeconds?: number
   ) => {
     const activeLabBoostSecs =
@@ -6286,17 +5766,6 @@ export default function App() {
     setTargetGoblinLabTimestamp(res.nextGoblinTs);
     setGoblinLabFormattedDate(res.nextGoblinDate);
     setLabSavedText(res.nextLabSavedText);
-
-    if (!skipNotifications) {
-      void scheduleLabNotificationsForVillage(
-        targetVillageId,
-        targetVillageName,
-        mainTimerVal,
-        res.nextMainTs,
-        goblinTimerVal,
-        res.nextGoblinTs
-      );
-    }
 
     return res;
   };
@@ -6344,13 +5813,6 @@ export default function App() {
         totalBoostSec,
         labApprentice
       );
-      void scheduleBoostExpiryNotificationsForVillage(
-        activeAccountId,
-        getActiveVillageName(activeAccountId),
-        builderBoostEndTime,
-        nextBoostEnd,
-        petBoostEndTime
-      );
       showToast(
         'success',
         `⚡ Activated ${potionsUsed} Research Potion${potionsUsed > 1 ? 's' : ''} (24x Speed)!`
@@ -6372,13 +5834,6 @@ export default function App() {
         getActiveVillageName(activeAccountId),
         0,
         labApprentice
-      );
-      void scheduleBoostExpiryNotificationsForVillage(
-        activeAccountId,
-        getActiveVillageName(activeAccountId),
-        builderBoostEndTime,
-        null,
-        petBoostEndTime
       );
       showToast('success', 'Reset Research Boost to 1x normal speed');
       return;
@@ -6533,10 +5988,10 @@ export default function App() {
   const computePetSchedule = (
     petTimerVal: BuilderTime,
     potionCount: number,
-    targetVillageId: string = activeAccountId,
-    targetVillageName: string = getActiveVillageName(activeAccountId),
+    _targetVillageId: string = activeAccountId,
+    _targetVillageName: string = getActiveVillageName(activeAccountId),
     overridePetBoostSeconds?: number,
-    skipNotifications = false,
+    _skipNotifications = false,
     overrideStudySoupSeconds?: number
   ) => {
     const activePetBoostSecs =
@@ -6557,15 +6012,6 @@ export default function App() {
     setTargetPetTimestamp(res.nextPetTs);
     setPetFormattedDate(res.nextPetDate);
     setPetSavedText(res.nextPetSavedText);
-
-    if (!skipNotifications) {
-      void schedulePetNotificationForVillage(
-        targetVillageId,
-        targetVillageName,
-        petTimerVal,
-        res.nextPetTs
-      );
-    }
 
     return res;
   };
@@ -6605,13 +6051,6 @@ export default function App() {
         getActiveVillageName(activeAccountId),
         totalBoostSec
       );
-      void scheduleBoostExpiryNotificationsForVillage(
-        activeAccountId,
-        getActiveVillageName(activeAccountId),
-        builderBoostEndTime,
-        labBoostEndTime,
-        nextBoostEnd
-      );
       showToast(
         'success',
         `⚡ Activated ${potionsUsed} Pet Potion${potionsUsed > 1 ? 's' : ''} (24x Speed)!`
@@ -6629,13 +6068,6 @@ export default function App() {
         activeAccountId,
         getActiveVillageName(activeAccountId),
         0
-      );
-      void scheduleBoostExpiryNotificationsForVillage(
-        activeAccountId,
-        getActiveVillageName(activeAccountId),
-        builderBoostEndTime,
-        labBoostEndTime,
-        null
       );
       showToast('success', 'Reset Pet Boost to 1x normal speed');
       return;
@@ -6690,7 +6122,6 @@ export default function App() {
     setTargetPetTimestamp(null);
     setPetFormattedDate('');
     setPetSavedText('');
-    void cancelSlotNotification(activeAccountId, 'pet_main');
   };
 
   const handleConfirmClearUpgradeSlot = () => {
@@ -6730,11 +6161,6 @@ export default function App() {
       activeSessionEndTime: null,
       recurrent: false,
     }));
-    void scheduleBuilderNotificationsForVillage(
-      activeAccountId,
-      getActiveVillageName(activeAccountId),
-      []
-    );
     showToast('success', 'All active timers and schedules reset');
   };
 
@@ -6875,11 +6301,11 @@ export default function App() {
     targetNumBuilders: number,
     targetBuilders: BuilderTime[],
     targetPotionsStr: string,
-    targetVillageId: string = activeAccountId,
-    targetVillageName: string = getActiveVillageName(activeAccountId),
+    _targetVillageId: string = activeAccountId,
+    _targetVillageName: string = getActiveVillageName(activeAccountId),
     overrideBuilderBoostSeconds?: number,
     overrideBuilderHelper?: BuilderApprenticeState,
-    skipNotifications = false,
+    _skipNotifications = false,
     overrideBuilderBiteSeconds?: number
   ): { computedResults: LockedResultItem[]; computedSavedText: string } => {
     const potions = Math.max(0, parseInt(targetPotionsStr, 10) || 0);
@@ -6903,14 +6329,6 @@ export default function App() {
       false,
       activeBuilderBiteSecs
     );
-
-    if (!skipNotifications) {
-      void scheduleBuilderNotificationsForVillage(
-        targetVillageId,
-        targetVillageName,
-        computedResults
-      );
-    }
 
     if (computedResults.length === 0) {
       setLockedResults([]);
@@ -6989,13 +6407,6 @@ export default function App() {
         totalBoostSec,
         builderApprentice
       );
-      void scheduleBoostExpiryNotificationsForVillage(
-        activeAccountId,
-        getActiveVillageName(activeAccountId),
-        nextBoostEnd,
-        labBoostEndTime,
-        petBoostEndTime
-      );
       showToast(
         'success',
         `⚡ Activated ${pendingPotions} Builder Potion${pendingPotions > 1 ? 's' : ''} (10x Speed)!`
@@ -7017,13 +6428,6 @@ export default function App() {
         getActiveVillageName(activeAccountId),
         0,
         builderApprentice
-      );
-      void scheduleBoostExpiryNotificationsForVillage(
-        activeAccountId,
-        getActiveVillageName(activeAccountId),
-        null,
-        labBoostEndTime,
-        petBoostEndTime
       );
       showToast('success', 'Reset Builder Boost to 1x normal speed');
       return;
@@ -7133,21 +6537,6 @@ export default function App() {
       nextHelper
     );
 
-    const assignedUpgradeFinishTs =
-      computedResults.find((r) => r.builderIndex === slotIdx)?.targetTimestamp ?? null;
-    const notifyCooldownTs = getHelperAvailableNotificationTimestamp({
-      helper: nextHelper,
-      assignedUpgradeFinishTimestamp: assignedUpgradeFinishTs,
-      now,
-    });
-    void scheduleExactSlotNotification({
-      villageId: activeAccountId,
-      slotKey: 'helper_builder',
-      title: `👷 Builder Helper Available • ${villageName}`,
-      body: `${villageName}: Builder's Apprentice cooldown has ended and is ready to assign!`,
-      targetTimestamp: notifyCooldownTs,
-    });
-
     const targetB = syncedBuilders[slotIdx];
     const targetLabel =
       targetB?.upgradeTitle ||
@@ -7204,21 +6593,6 @@ export default function App() {
       undefined,
       nextHelper
     );
-
-    const assignedLabFinishTs =
-      slot === 'main' ? labSched.nextMainTs : labSched.nextGoblinTs;
-    const notifyCooldownTs = getHelperAvailableNotificationTimestamp({
-      helper: nextHelper,
-      assignedUpgradeFinishTimestamp: assignedLabFinishTs,
-      now,
-    });
-    void scheduleExactSlotNotification({
-      villageId: activeAccountId,
-      slotKey: 'helper_lab',
-      title: `🔬 Lab Helper Available • ${villageName}`,
-      body: `${villageName}: Lab Apprentice cooldown has ended and is ready to assign!`,
-      targetTimestamp: notifyCooldownTs,
-    });
 
     const targetTimer = slot === 'main' ? syncedMain : syncedGoblin;
     const targetLabel =
@@ -7489,46 +6863,6 @@ export default function App() {
     } catch {
       // Ignore storage error
     }
-
-    // Reschedule notifications for all restored villages in serialized single passes
-    restoredAccounts.forEach((profile) => {
-      const d = profile.data;
-      const bResults = d.lockedResults || [];
-      const assignedBuilderFinishTs =
-        d.builderApprentice?.assignedSlot !== null &&
-        d.builderApprentice?.assignedSlot !== undefined
-          ? bResults.find((r) => r.builderIndex === d.builderApprentice?.assignedSlot)
-              ?.targetTimestamp ?? null
-          : null;
-      const assignedLabFinishTs =
-        d.labApprentice?.assignedSlot === 'main'
-          ? d.targetLabTimestamp ?? null
-          : d.labApprentice?.assignedSlot === 'goblin'
-          ? d.targetGoblinLabTimestamp ?? null
-          : null;
-      void scheduleAllVillageNotificationsSinglePass({
-        villageId: profile.id,
-        villageName: profile.name,
-        builderResults: bResults,
-        labMainTimer: d.labTimer || createEmptyTimer(),
-        labMainTargetTs: d.targetLabTimestamp ?? null,
-        labGoblinTimer: d.goblinLabTimer || createEmptyTimer(),
-        labGoblinTargetTs: d.targetGoblinLabTimestamp ?? null,
-        petTimerVal: d.petTimer || createEmptyTimer(),
-        petTargetTs: d.targetPetTimestamp ?? null,
-        builderBoostEndTime: d.builderBoostEndTime ?? null,
-        labBoostEndTime: d.labBoostEndTime ?? null,
-        petBoostEndTime: d.petBoostEndTime ?? null,
-        builderHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-          helper: d.builderApprentice,
-          assignedUpgradeFinishTimestamp: assignedBuilderFinishTs,
-        }),
-        labHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-          helper: d.labApprentice,
-          assignedUpgradeFinishTimestamp: assignedLabFinishTs,
-        }),
-      });
-    });
 
     showToast(
       'success',
@@ -8022,44 +7356,6 @@ export default function App() {
       true,
       studySoupSeconds
     );
-
-    const assignedBuilderUpgradeFinishTs =
-      nextBuilderApprentice.assignedSlot !== null
-        ? computedResults.find((r) => r.builderIndex === nextBuilderApprentice.assignedSlot)
-            ?.targetTimestamp ?? null
-        : null;
-    const assignedLabUpgradeFinishTs =
-      nextLabApprentice.assignedSlot === 'main'
-        ? labSched.nextMainTs
-        : nextLabApprentice.assignedSlot === 'goblin'
-        ? labSched.nextGoblinTs
-        : null;
-
-    // Clear all previous pending notifications once and schedule all active upgrade & boost alarms in a single pass
-    void scheduleAllVillageNotificationsSinglePass({
-      villageId: targetVillageId,
-      villageName: targetVillageName,
-      builderResults: computedResults,
-      labMainTimer: nextLabTimer,
-      labMainTargetTs: labSched.nextMainTs,
-      labGoblinTimer: nextGoblinLabTimer,
-      labGoblinTargetTs: labSched.nextGoblinTs,
-      petTimerVal: nextPetTimer,
-      petTargetTs: petSched.nextPetTs,
-      builderBoostEndTime: nextBuilderBoostEndTime,
-      labBoostEndTime: nextLabBoostEndTime,
-      petBoostEndTime: nextPetBoostEndTime,
-      builderHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-        helper: nextBuilderApprentice,
-        assignedUpgradeFinishTimestamp: assignedBuilderUpgradeFinishTs,
-        now: importNow,
-      }),
-      labHelperCooldownEndTime: getHelperAvailableNotificationTimestamp({
-        helper: nextLabApprentice,
-        assignedUpgradeFinishTimestamp: assignedLabUpgradeFinishTs,
-        now: importNow,
-      }),
-    });
 
     const townHallBuildingItem = Array.isArray(parsedData.buildings)
       ? parsedData.buildings.find((b) => Number(b?.data ?? b?.id) === 1000001)
@@ -11104,6 +10400,59 @@ export default function App() {
                 Restore All Villages
               </button>
             </div>
+
+            {isNativeNotificationPlatform() && (
+              <div className="rounded-2xl p-3.5 bg-white/5 border border-white/10 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-gray-200">
+                    Pending Android Alarms:{' '}
+                    <span className="font-extrabold text-[#fbbf24]">
+                      {pendingAlarmCount !== null ? pendingAlarmCount : '—'}
+                    </span>
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={isRefreshingAlarms}
+                      onClick={() => {
+                        triggerHaptic(12);
+                        void refreshNotificationDiagnostics();
+                      }}
+                      className="tactile text-[11px] font-extrabold px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 border border-white/15 cursor-pointer disabled:opacity-50"
+                    >
+                      {isRefreshingAlarms ? '...' : 'Refresh'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSchedulingTestAlarm}
+                      onClick={() => void handleScheduleTestAlarm()}
+                      className="tactile text-[11px] font-extrabold px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-[#fbbf24] border border-amber-400/40 cursor-pointer disabled:opacity-50"
+                    >
+                      {isSchedulingTestAlarm ? '...' : 'Test (1 min)'}
+                    </button>
+                  </div>
+                </div>
+                {(testAlarmConfirmText ||
+                  notificationStatus.permission === 'denied' ||
+                  notificationStatus.permission === 'blocked' ||
+                  notificationStatus.exact === 'denied') && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    {testAlarmConfirmText && (
+                      <span className="font-bold text-emerald-300">{testAlarmConfirmText}</span>
+                    )}
+                    {(notificationStatus.permission === 'denied' ||
+                      notificationStatus.permission === 'blocked') && (
+                      <span className="font-bold text-rose-300">Notifications blocked</span>
+                    )}
+                    {notificationStatus.permission !== 'denied' &&
+                      notificationStatus.permission !== 'blocked' &&
+                      notificationStatus.exact === 'denied' && (
+                        <span className="font-bold text-amber-300">Exact alarms off</span>
+                      )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
