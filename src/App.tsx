@@ -32,6 +32,16 @@ import {
   type AccountSnapshot,
   type NotificationStatusSnapshot,
 } from './services/notificationEngine';
+import {
+  PREFIX as BACKUP_CODE_PREFIX,
+  decodeBackup,
+  encodeBackup,
+} from './services/backupCodec';
+import {
+  collectHistoryForTags,
+  restoreHistoryEntries,
+  type RestoreHistoryResult,
+} from './services/backupHistory';
 
 export const COC_NAMES: Record<string | number, string> = {
   // Town Hall & Key Buildings
@@ -4059,6 +4069,8 @@ const LedgerQuickStatsRow: React.FC<{
   targetGoblinLabTimestamp: number | null;
   labBoostEndTime: number | null;
   labApprentice: LabApprenticeState;
+  targetPetTimestamp: number | null;
+  petBoostEndTime: number | null;
 }> = React.memo(
   ({
     regularCap,
@@ -4069,6 +4081,8 @@ const LedgerQuickStatsRow: React.FC<{
     targetGoblinLabTimestamp,
     labBoostEndTime,
     labApprentice,
+    targetPetTimestamp,
+    petBoostEndTime,
   }) => {
     const computeSnapshot = (now: number) => {
       // Dynamically filter unfinished builder upgrades against `now` every second
@@ -4107,11 +4121,19 @@ const LedgerQuickStatsRow: React.FC<{
         nextLabText = labParts.isFinished ? 'Idle' : formatQuickStatDuration(labParts);
       }
 
+      let nextPetText = 'Idle';
+      if (targetPetTimestamp && targetPetTimestamp > now) {
+        const petRealRemSec = Math.max(0, Math.ceil((targetPetTimestamp - now) / 1000));
+        const petParts = formatTotalSecondsToParts(petRealRemSec);
+        nextPetText = petParts.isFinished ? 'Idle' : formatQuickStatDuration(petParts);
+      }
+
       return {
         busyRegularCount,
         isGoblinBusy,
         nextFreeText,
         nextLabText,
+        nextPetText,
       };
     };
 
@@ -4124,7 +4146,8 @@ const LedgerQuickStatsRow: React.FC<{
           prev.busyRegularCount === next.busyRegularCount &&
           prev.isGoblinBusy === next.isGoblinBusy &&
           prev.nextFreeText === next.nextFreeText &&
-          prev.nextLabText === next.nextLabText
+          prev.nextLabText === next.nextLabText &&
+          prev.nextPetText === next.nextPetText
             ? prev
             : next
         );
@@ -4139,10 +4162,12 @@ const LedgerQuickStatsRow: React.FC<{
       targetGoblinLabTimestamp,
       labBoostEndTime,
       labApprentice,
+      targetPetTimestamp,
+      petBoostEndTime,
     ]);
 
     return (
-      <div className="grid grid-cols-3 gap-2.5">
+      <div className="grid grid-cols-2 gap-2.5">
         {/* Card 1: BUILDERS */}
         <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
           <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
@@ -4174,6 +4199,17 @@ const LedgerQuickStatsRow: React.FC<{
           </div>
           <div className="text-lg sm:text-2xl font-extrabold text-[#93C5FD] tracking-tight tabular-nums mt-1.5 truncate">
             {stats.nextLabText}
+          </div>
+        </div>
+
+        {/* Card 4: NEXT PET */}
+        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+          <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
+            <span className="text-[#67E8F9]" aria-hidden="true">🐾</span>
+            <span>NEXT PET</span>
+          </div>
+          <div className="text-lg sm:text-2xl font-extrabold text-[#67E8F9] tracking-tight tabular-nums mt-1.5 truncate">
+            {stats.nextPetText}
           </div>
         </div>
       </div>
@@ -6742,7 +6778,7 @@ export default function App() {
   // ============================================================================
   // FULL MULTI-ACCOUNT BACKUP & RESTORE (1-TAP EXPORT / IMPORT ALL VILLAGES)
   // ============================================================================
-  const buildFullBackupPayload = (): string => {
+  const buildFullBackupObject = () => {
     const currentActiveState: SavedState = {
       mode: currentMode,
       numBuilders,
@@ -6776,26 +6812,63 @@ export default function App() {
       acc.id === activeAccountId ? { ...acc, data: currentActiveState } : acc
     );
 
-    return JSON.stringify(
-      {
-        clashPlannerBackupVersion: 1,
-        exportedAt: Date.now(),
-        activeAccountId,
-        accounts: syncedAccounts,
-      },
-      null,
-      2
-    );
+    const accountTags = syncedAccounts
+      .map((acc) => acc.tag)
+      .filter((t): t is string => typeof t === 'string' && t.trim().length > 0);
+    const history = collectHistoryForTags(localStorage, accountTags);
+
+    return {
+      clashPlannerBackupVersion: 2,
+      exportedAt: Date.now(),
+      activeAccountId,
+      accounts: syncedAccounts,
+      history,
+    };
+  };
+
+  const buildFullBackupPayload = (): string => {
+    return JSON.stringify(buildFullBackupObject(), null, 2);
   };
 
   const handleCopyFullBackup = async () => {
     triggerHaptic(15);
-    const payload = buildFullBackupPayload();
+    const code = await encodeBackup(buildFullBackupObject());
+    const successMsg = `Copied backup for ${accounts.length} village${accounts.length === 1 ? '' : 's'} (${code.length} characters)`;
     try {
-      await navigator.clipboard.writeText(payload);
-      showToast('success', `Copied backup for ${accounts.length} village${accounts.length > 1 ? 's' : ''}!`);
+      await navigator.clipboard.writeText(code);
+      showToast('success', successMsg);
+      return;
     } catch {
-      setBackupRestoreInput(payload);
+      // Fall back to hidden textarea + execCommand('copy')
+    }
+
+    let copied = false;
+    let hiddenTextarea: HTMLTextAreaElement | null = null;
+    try {
+      hiddenTextarea = document.createElement('textarea');
+      hiddenTextarea.value = code;
+      hiddenTextarea.setAttribute('readonly', '');
+      hiddenTextarea.style.position = 'fixed';
+      hiddenTextarea.style.top = '-9999px';
+      hiddenTextarea.style.left = '-9999px';
+      hiddenTextarea.style.opacity = '0';
+      document.body.appendChild(hiddenTextarea);
+      hiddenTextarea.focus();
+      hiddenTextarea.select();
+      hiddenTextarea.setSelectionRange(0, code.length);
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    } finally {
+      if (hiddenTextarea && hiddenTextarea.parentNode) {
+        hiddenTextarea.parentNode.removeChild(hiddenTextarea);
+      }
+    }
+
+    if (copied) {
+      showToast('success', successMsg);
+    } else {
+      setBackupRestoreInput(code);
       showToast('success', 'Backup generated below — long-press to copy');
     }
   };
@@ -6848,6 +6921,11 @@ export default function App() {
     const activeProfile =
       restoredAccounts.find((a) => a.id === requestedActiveId) || restoredAccounts[0];
 
+    let historyResult: RestoreHistoryResult | null = null;
+    if (rawObj.history !== undefined && rawObj.history !== null) {
+      historyResult = restoreHistoryEntries(localStorage, rawObj.history);
+    }
+
     setAccounts(restoredAccounts);
     setActiveAccountId(activeProfile.id);
     applySavedStateToActiveView(activeProfile.data);
@@ -6864,42 +6942,60 @@ export default function App() {
       // Ignore storage error
     }
 
-    showToast(
-      'success',
-      `Restored ${restoredAccounts.length} village profile${restoredAccounts.length > 1 ? 's' : ''}!`
-    );
+    const baseSuccessToast =
+      historyResult && historyResult.written > 0
+        ? `Restored ${restoredAccounts.length} village${restoredAccounts.length === 1 ? '' : 's'} + progress history (${historyResult.written} ${historyResult.written === 1 ? 'entry' : 'entries'})`
+        : `Restored ${restoredAccounts.length} village profile${restoredAccounts.length > 1 ? 's' : ''}!`;
+    const finalSuccessToast =
+      historyResult && historyResult.failed > 0
+        ? `${baseSuccessToast} (${historyResult.failed} could not be saved)`
+        : baseSuccessToast;
+
+    showToast('success', finalSuccessToast);
     return true;
   };
 
-  const handleRestoreFromBackupText = (rawText: string = backupRestoreInput) => {
+  const handleRestoreFromBackupText = async (rawText: string = backupRestoreInput) => {
     triggerHaptic(15);
-    const trimmed = rawText.trim();
-    if (!trimmed) {
-      showToast('error', 'Paste your Clash Planner backup JSON first');
+    const decoded = await decodeBackup(rawText);
+    if (!decoded.ok) {
+      showToast('error', decoded.message);
       return;
     }
-    try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      if (parsed && typeof parsed === 'object' && restoreAccountsFromBackupObject(parsed)) {
-        setIsBackupModalOpen(false);
-        setBackupRestoreInput('');
-        return;
-      }
-      showToast('error', 'Invalid Clash Planner backup JSON');
-    } catch {
-      showToast('error', 'Invalid JSON format');
+    if (restoreAccountsFromBackupObject(decoded.data as Record<string, unknown>)) {
+      setIsBackupModalOpen(false);
+      setBackupRestoreInput('');
+      return;
     }
+    showToast('error', 'Invalid Clash Planner backup JSON');
   };
 
   // ============================================================================
   // 2. JSON PARSING & STATE EXTRACTION (BUILDERS + LAB + PET HOUSE + BOOSTS + HELPERS)
   // ============================================================================
-  const handleImportVillageJson = () => {
+  const handleImportVillageJson = async () => {
     triggerHaptic(15);
 
     const trimmed = jsonInputText.trim();
     if (!trimmed) {
       showToast('error', 'Invalid JSON format');
+      return;
+    }
+
+    if (trimmed.includes(BACKUP_CODE_PREFIX)) {
+      const decoded = await decodeBackup(trimmed);
+      if (!decoded.ok) {
+        showToast('error', decoded.message);
+        return;
+      }
+      if (restoreAccountsFromBackupObject(decoded.data as Record<string, unknown>)) {
+        setIsImportModalOpen(false);
+        setIsAddingNewAccount(false);
+        setNewVillageNameInput('');
+        setJsonInputText('');
+        return;
+      }
+      showToast('error', 'Invalid Clash Planner backup JSON');
       return;
     }
 
@@ -8375,6 +8471,8 @@ export default function App() {
           targetGoblinLabTimestamp={effectiveLabGoblinTimestamp}
           labBoostEndTime={labBoostEndTime}
           labApprentice={labApprentice}
+          targetPetTimestamp={effectivePetTimestamp}
+          petBoostEndTime={petBoostEndTime}
         />
 
         {/* =============================================================== */}
@@ -10348,10 +10446,8 @@ export default function App() {
                     const reader = new FileReader();
                     reader.onload = () => {
                       const content = typeof reader.result === 'string' ? reader.result : '';
-                      if (content) {
-                        setBackupRestoreInput(content);
-                        handleRestoreFromBackupText(content);
-                      }
+                      setBackupRestoreInput(content);
+                      void handleRestoreFromBackupText(content);
                     };
                     reader.readAsText(file);
                     e.target.value = '';
@@ -10374,7 +10470,7 @@ export default function App() {
                   ref={backupRestoreTextareaRef}
                   value={backupRestoreInput}
                   onChange={(e) => setBackupRestoreInput(e.target.value)}
-                  placeholder="Paste your Clash Planner backup JSON here to restore all villages..."
+                  placeholder="Paste your backup code or JSON here..."
                   rows={4}
                   className="glass-input w-full rounded-xl p-3 text-xs font-mono text-gray-100 placeholder-gray-500 resize-none focus:outline-none"
                 />
@@ -10394,7 +10490,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => handleRestoreFromBackupText()}
+                onClick={() => void handleRestoreFromBackupText()}
                 className="btn-calculate tactile w-full py-2.5 px-4 rounded-xl font-extrabold text-xs sm:text-sm text-white shadow-lg cursor-pointer"
               >
                 Restore All Villages
