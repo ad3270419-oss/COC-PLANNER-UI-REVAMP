@@ -40,6 +40,56 @@ body {
 .ledger-stat-card {
   background: #141923;
   border: 1px solid #262E3D;
+  position: relative;
+  isolation: isolate;
+}
+
+.ledger-stat-card[data-tone="active"],
+.ledger-stat-card[data-tone="soon"] {
+  border-color: rgba(var(--neon-rgb), 0.55);
+  box-shadow: 0 0 14px rgba(var(--neon-rgb), 0.20);
+}
+
+.ledger-stat-card[data-tone="idle"] {
+  border-color: rgba(var(--neon-rgb), 0.25);
+  box-shadow: none;
+}
+
+.ledger-stat-card .ledger-stat-value {
+  color: var(--neon-text);
+}
+
+.ledger-stat-card[data-tone="idle"] .ledger-stat-value {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.ledger-stat-card[data-tone="soon"]::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  border: 1px solid rgba(var(--neon-rgb), 0.90);
+  box-shadow: 0 0 16px rgba(var(--neon-rgb), 0.55);
+  opacity: 0;
+  will-change: opacity;
+  animation: ledgerStatNeonPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes ledgerStatNeonPulse {
+  0%, 100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ledger-stat-card[data-tone="soon"]::after {
+    animation: none;
+    opacity: 0.45;
+  }
 }
 
 .ledger-boost-card {

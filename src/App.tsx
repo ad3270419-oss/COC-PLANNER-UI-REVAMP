@@ -42,6 +42,10 @@ import {
   restoreHistoryEntries,
   type RestoreHistoryResult,
 } from './services/backupHistory';
+import {
+  getQuickStatCssVars,
+  getQuickStatTone,
+} from './services/quickStatTheme';
 
 export const COC_NAMES: Record<string | number, string> = {
   // Town Hall & Key Buildings
@@ -4096,6 +4100,7 @@ const LedgerQuickStatsRow: React.FC<{
       const soonestActiveBuilder = activeBuilders[0] || null;
 
       let nextFreeText = 'All Free';
+      let freeRemainingSeconds: number | null = null;
       if (soonestActiveBuilder) {
         const realRemSec = Math.max(
           0,
@@ -4103,9 +4108,11 @@ const LedgerQuickStatsRow: React.FC<{
         );
         const parts = formatTotalSecondsToParts(realRemSec);
         nextFreeText = parts.isFinished ? 'Free' : formatQuickStatDuration(parts);
+        freeRemainingSeconds = parts.isFinished ? null : realRemSec;
       }
 
       let nextLabText = 'Idle';
+      let labRemainingSeconds: number | null = null;
       const candidates: Array<{ ts: number; slot: 'main' | 'goblin' }> = [];
       if (targetLabTimestamp && targetLabTimestamp > now) {
         candidates.push({ ts: targetLabTimestamp, slot: 'main' });
@@ -4119,13 +4126,16 @@ const LedgerQuickStatsRow: React.FC<{
         const labRealRemSec = Math.max(0, Math.ceil((soonestLab.ts - now) / 1000));
         const labParts = formatTotalSecondsToParts(labRealRemSec);
         nextLabText = labParts.isFinished ? 'Idle' : formatQuickStatDuration(labParts);
+        labRemainingSeconds = labParts.isFinished ? null : labRealRemSec;
       }
 
       let nextPetText = 'Idle';
+      let petRemainingSeconds: number | null = null;
       if (targetPetTimestamp && targetPetTimestamp > now) {
         const petRealRemSec = Math.max(0, Math.ceil((targetPetTimestamp - now) / 1000));
         const petParts = formatTotalSecondsToParts(petRealRemSec);
         nextPetText = petParts.isFinished ? 'Idle' : formatQuickStatDuration(petParts);
+        petRemainingSeconds = petParts.isFinished ? null : petRealRemSec;
       }
 
       return {
@@ -4134,6 +4144,9 @@ const LedgerQuickStatsRow: React.FC<{
         nextFreeText,
         nextLabText,
         nextPetText,
+        freeRemainingSeconds,
+        labRemainingSeconds,
+        petRemainingSeconds,
       };
     };
 
@@ -4147,7 +4160,13 @@ const LedgerQuickStatsRow: React.FC<{
           prev.isGoblinBusy === next.isGoblinBusy &&
           prev.nextFreeText === next.nextFreeText &&
           prev.nextLabText === next.nextLabText &&
-          prev.nextPetText === next.nextPetText
+          prev.nextPetText === next.nextPetText &&
+          getQuickStatTone('free', prev.freeRemainingSeconds) ===
+            getQuickStatTone('free', next.freeRemainingSeconds) &&
+          getQuickStatTone('lab', prev.labRemainingSeconds) ===
+            getQuickStatTone('lab', next.labRemainingSeconds) &&
+          getQuickStatTone('pet', prev.petRemainingSeconds) ===
+            getQuickStatTone('pet', next.petRemainingSeconds)
             ? prev
             : next
         );
@@ -4166,49 +4185,70 @@ const LedgerQuickStatsRow: React.FC<{
       petBoostEndTime,
     ]);
 
+    const buildersTone = getQuickStatTone('builders', null);
+    const freeTone = getQuickStatTone('free', stats.freeRemainingSeconds);
+    const labTone = getQuickStatTone('lab', stats.labRemainingSeconds);
+    const petTone = getQuickStatTone('pet', stats.petRemainingSeconds);
+
     return (
       <div className="grid grid-cols-2 gap-2.5">
         {/* Card 1: BUILDERS */}
-        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+        <div
+          className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between"
+          data-tone={buildersTone}
+          style={getQuickStatCssVars('builders') as React.CSSProperties}
+        >
           <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
             <span className="text-[#F3CA65]" aria-hidden="true">🔨</span>
             <span>BUILDERS</span>
           </div>
-          <div className="text-lg sm:text-2xl font-extrabold text-[#F3CA65] tracking-tight tabular-nums mt-1.5">
+          <div className="ledger-stat-value text-lg sm:text-2xl font-extrabold tracking-tight tabular-nums mt-1.5">
             {stats.busyRegularCount} / {regularCap}
             {stats.isGoblinBusy ? ' + G' : ''}
           </div>
         </div>
 
         {/* Card 2: NEXT FREE */}
-        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+        <div
+          className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between"
+          data-tone={freeTone}
+          style={getQuickStatCssVars('free') as React.CSSProperties}
+        >
           <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
             <span className="text-[#4ADE80]" aria-hidden="true">🕒</span>
             <span>NEXT FREE</span>
           </div>
-          <div className="text-lg sm:text-2xl font-extrabold text-[#4ADE80] tracking-tight tabular-nums mt-1.5 truncate">
+          <div className="ledger-stat-value text-lg sm:text-2xl font-extrabold tracking-tight tabular-nums mt-1.5 truncate">
             {stats.nextFreeText}
           </div>
         </div>
 
         {/* Card 3: NEXT LAB */}
-        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+        <div
+          className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between"
+          data-tone={labTone}
+          style={getQuickStatCssVars('lab') as React.CSSProperties}
+        >
           <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
             <span className="text-[#93C5FD]" aria-hidden="true">🕒</span>
             <span>NEXT LAB</span>
           </div>
-          <div className="text-lg sm:text-2xl font-extrabold text-[#93C5FD] tracking-tight tabular-nums mt-1.5 truncate">
+          <div className="ledger-stat-value text-lg sm:text-2xl font-extrabold tracking-tight tabular-nums mt-1.5 truncate">
             {stats.nextLabText}
           </div>
         </div>
 
         {/* Card 4: NEXT PET */}
-        <div className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between">
+        <div
+          className="ledger-stat-card rounded-2xl p-3.5 flex flex-col justify-between"
+          data-tone={petTone}
+          style={getQuickStatCssVars('pet') as React.CSSProperties}
+        >
           <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#8E9AA8]">
             <span className="text-[#67E8F9]" aria-hidden="true">🐾</span>
             <span>NEXT PET</span>
           </div>
-          <div className="text-lg sm:text-2xl font-extrabold text-[#67E8F9] tracking-tight tabular-nums mt-1.5 truncate">
+          <div className="ledger-stat-value text-lg sm:text-2xl font-extrabold tracking-tight tabular-nums mt-1.5 truncate">
             {stats.nextPetText}
           </div>
         </div>
