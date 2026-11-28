@@ -5241,12 +5241,12 @@ export default function App() {
     liveActiveNotificationData
   );
 
-  // Sync once on launch after initial accounts have loaded
+  // Sync once on launch after initial accounts have loaded (forced re-register)
   useEffect(() => {
     if (!isNativeNotificationPlatform()) return;
     const snapshots = latestNotificationSnapshotsRef.current;
     if (snapshots.length === 0) return;
-    void syncAllNotifications(snapshots).then(() => {
+    void syncAllNotifications(snapshots, { force: true }).then(() => {
       setNotificationStatus(getNotificationStatus());
     });
   }, []);
@@ -5292,17 +5292,17 @@ export default function App() {
   // Native-only resume sync on visibilitychange + window focus (isolated from Master Tick Interval)
   useEffect(() => {
     if (!isNativeNotificationPlatform()) return;
-    let lastResumeSyncTs = 0;
+    let lastResumeForcedSyncTs = 0;
 
     const triggerResumeNotificationSync = () => {
       if (document.hidden) return;
       const now = Date.now();
-      if (now - lastResumeSyncTs < 800) return;
-      lastResumeSyncTs = now;
+      if (now - lastResumeForcedSyncTs < 60_000) return;
+      lastResumeForcedSyncTs = now;
       const snapshots = latestNotificationSnapshotsRef.current;
       if (snapshots.length === 0) return;
       void ensureChannel()
-        .then(() => syncAllNotifications(snapshots))
+        .then(() => syncAllNotifications(snapshots, { force: true }))
         .then(() => {
           setNotificationStatus(getNotificationStatus());
         });
@@ -6990,6 +6990,20 @@ export default function App() {
       historyResult && historyResult.failed > 0
         ? `${baseSuccessToast} (${historyResult.failed} could not be saved)`
         : baseSuccessToast;
+
+    if (isNativeNotificationPlatform()) {
+      const restoredSnapshots = mapVillageProfilesToNotificationSnapshots(
+        restoredAccounts,
+        activeProfile.id,
+        activeProfile.data
+      );
+      latestNotificationSnapshotsRef.current = restoredSnapshots;
+      void ensureChannel()
+        .then(() => syncAllNotifications(restoredSnapshots, { force: true }))
+        .then(() => {
+          setNotificationStatus(getNotificationStatus());
+        });
+    }
 
     showToast('success', finalSuccessToast);
     return true;
@@ -10541,7 +10555,7 @@ export default function App() {
               <div className="rounded-2xl p-3.5 bg-white/5 border border-white/10 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-bold text-gray-200">
-                    Pending Android Alarms:{' '}
+                    Saved alarms (app list):{' '}
                     <span className="font-extrabold text-[#fbbf24]">
                       {pendingAlarmCount !== null ? pendingAlarmCount : '—'}
                     </span>
@@ -10568,6 +10582,16 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+                {notificationStatus.lastForcedRegisterAt !== null && (
+                  <div className="text-[11px] text-gray-400">
+                    Alarms refreshed{' '}
+                    {(() => {
+                      const d = new Date(notificationStatus.lastForcedRegisterAt);
+                      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                    })()}{' '}
+                    ({notificationStatus.desiredCount} set)
+                  </div>
+                )}
                 {(testAlarmConfirmText ||
                   notificationStatus.permission === 'denied' ||
                   notificationStatus.permission === 'blocked' ||

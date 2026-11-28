@@ -29,6 +29,8 @@ export interface NotificationStatusSnapshot {
   permission: NotificationDisplayStatus;
   exact: PermissionTriState;
   lastSyncAt: number | null;
+  lastForcedRegisterAt: number | null;
+  desiredCount: number;
   lastError: string | null;
 }
 
@@ -91,11 +93,14 @@ const GENERIC_BUILDER_NAME_PATTERN = /^builder\s+\d+(\s+upgrade)?$/i;
 let cachedDisplayPermission: NotificationDisplayStatus = 'unknown';
 let cachedExactPermission: PermissionTriState = 'unknown';
 let lastSyncAt: number | null = null;
+let lastForcedRegisterAt: number | null = null;
+let lastDesiredCount = 0;
 let lastError: string | null = null;
 let inFlightPermissionRequest: Promise<NotificationPermissionResult> | null = null;
 
 let isSyncRunning = false;
 let latestQueuedAccounts: AccountSnapshot[] | null = null;
+let latestQueuedForce = false;
 let activeSyncPromise: Promise<void> | null = null;
 
 export function isNativeNotificationPlatform(): boolean {
@@ -559,12 +564,88 @@ function toCapacitorSchema(item: DesiredNotificationItem): LocalNotificationSche
   };
 }
 
-function getPendingSignature(pending: PendingLocalNotificationSchema): string | null {
+export interface PendingNotificationLike {
+  id: number;
+  extra?: Record<string, unknown> | null;
+}
+
+export interface SyncPlan {
+  toSchedule: DesiredNotificationItem[];
+  toCancel: number[];
+}
+
+export interface SyncNotificationOptions {
+  force?: boolean;
+}
+
+function getPendingSignature(pending: PendingNotificationLike): string | null {
   const extra = pending.extra as Record<string, unknown> | null | undefined;
   if (extra && typeof extra.sig === 'string' && extra.sig.length > 0) {
     return extra.sig;
   }
   return null;
+}
+
+/**
+ * Pure diff planner between desired notifications and Capacitor's saved pending list.
+ * - force = false: schedule only missing IDs or changed signatures.
+ * - force = true: schedule ALL desired items (re-registering AlarmManager alarms even when sig matches).
+ * - In both modes, cancel only orphaned pending IDs (never TEST_ALARM_ID).
+ */
+export function planSync(
+  desired: DesiredNotificationItem[],
+  pending: PendingNotificationLike[],
+  options?: SyncNotificationOptions
+): SyncPlan {
+  const force = options?.force === true;
+  const pendingById = new Map<number, PendingNotificationLike>();
+  for (const p of pending) {
+    if (typeof p?.id === 'number' && Number.isFinite(p.id)) {
+      pendingById.set(p.id, p);
+    }
+  }
+
+  const desiredIds = new Set<number>();
+  const toSchedule: DesiredNotificationItem[] = [];
+
+  for (const item of desired) {
+    desiredIds.add(item.id);
+    if (force) {
+      toSchedule.push(item);
+      continue;
+    }
+    const existing = pendingById.get(item.id);
+    if (!existing) {
+      toSchedule.push(item);
+      continue;
+    }
+    const existingSig = getPendingSignature(existing);
+    if (existingSig !== item.sig) {
+      toSchedule.push(item);
+    }
+  }
+
+  const toCancel: number[] = [];
+  for (const p of pending) {
+    if (
+      typeof p?.id === 'number' &&
+      Number.isFinite(p.id) &&
+      !desiredIds.has(p.id) &&
+      p.id !== TEST_ALARM_ID
+    ) {
+      toCancel.push(p.id);
+    }
+  }
+
+  return { toSchedule, toCancel };
+}
+
+/**
+ * Merges queued force flags with logical OR so a normal sync queued after
+ * a forced sync never drops the pending forced re-registration.
+ */
+export function mergeQueuedForceFlag(existingForce: boolean, incomingForce?: boolean): boolean {
+  return existingForce || incomingForce === true;
 }
 
 async function scheduleBatchWithSingleRetry(
@@ -586,13 +667,18 @@ async function scheduleBatchWithSingleRetry(
   }
 }
 
-async function runSingleSyncPass(accounts: AccountSnapshot[]): Promise<void> {
+async function runSingleSyncPass(
+  accounts: AccountSnapshot[],
+  options?: SyncNotificationOptions
+): Promise<void> {
   if (!isNativeNotificationPlatform()) return;
 
   // (a) Guard: empty / undefined / unloaded accounts must never cancel existing alarms
   if (!Array.isArray(accounts) || accounts.length === 0) {
     return;
   }
+
+  const force = options?.force === true;
 
   try {
     // (b) Ensure channel & permissions
@@ -613,31 +699,11 @@ async function runSingleSyncPass(accounts: AccountSnapshot[]): Promise<void> {
       return;
     }
 
-    const pendingById = new Map<number, PendingLocalNotificationSchema>();
-    for (const p of pending) {
-      if (typeof p?.id === 'number' && Number.isFinite(p.id)) {
-        pendingById.set(p.id, p);
-      }
-    }
-
     // (d) Build desired set across ALL accounts
     const desired = buildDesiredNotifications(accounts, Date.now());
-    const desiredIds = new Set<number>();
 
-    // (e) Diff: schedule only missing IDs or changed signatures (missing extra.sig => changed)
-    const toSchedule: DesiredNotificationItem[] = [];
-    for (const item of desired) {
-      desiredIds.add(item.id);
-      const existing = pendingById.get(item.id);
-      if (!existing) {
-        toSchedule.push(item);
-        continue;
-      }
-      const existingSig = getPendingSignature(existing);
-      if (existingSig !== item.sig) {
-        toSchedule.push(item);
-      }
-    }
+    // (e) Plan schedule & orphan cancel sets
+    const { toSchedule, toCancel } = planSync(desired, pending, { force });
 
     // (f) SCHEDULE FIRST in one call — never cancel before schedule succeeds
     if (toSchedule.length > 0) {
@@ -648,29 +714,22 @@ async function runSingleSyncPass(accounts: AccountSnapshot[]): Promise<void> {
     }
 
     // (g) THEN cancel only orphaned pending IDs (never touch matching IDs or TEST_ALARM_ID)
-    const orphanIds: number[] = [];
-    for (const p of pending) {
-      if (
-        typeof p?.id === 'number' &&
-        Number.isFinite(p.id) &&
-        !desiredIds.has(p.id) &&
-        p.id !== TEST_ALARM_ID
-      ) {
-        orphanIds.push(p.id);
-      }
-    }
-
-    if (orphanIds.length > 0) {
+    if (toCancel.length > 0) {
       try {
         await LocalNotifications.cancel({
-          notifications: orphanIds.map((id) => ({ id })),
+          notifications: toCancel.map((id) => ({ id })),
         });
       } catch (cancelErr) {
         logError('LocalNotifications.cancel orphans failed', cancelErr);
       }
     }
 
-    lastSyncAt = Date.now();
+    const nowTs = Date.now();
+    lastSyncAt = nowTs;
+    lastDesiredCount = desired.length;
+    if (force) {
+      lastForcedRegisterAt = nowTs;
+    }
     lastError = null;
   } catch (err) {
     logError('syncAllNotifications pass failed', err);
@@ -681,8 +740,12 @@ async function runSingleSyncPass(accounts: AccountSnapshot[]): Promise<void> {
  * Latest-wins serialized sync:
  * At most one run executes at a time; concurrent calls store the newest snapshot
  * and run exactly once more after the active pass finishes (no unbounded queue).
+ * Queued force flags are merged with OR so a forced refresh is never dropped.
  */
-export function syncAllNotifications(accounts: AccountSnapshot[]): Promise<void> {
+export function syncAllNotifications(
+  accounts: AccountSnapshot[],
+  options?: SyncNotificationOptions
+): Promise<void> {
   if (!isNativeNotificationPlatform()) {
     return Promise.resolve();
   }
@@ -691,6 +754,7 @@ export function syncAllNotifications(accounts: AccountSnapshot[]): Promise<void>
   }
 
   latestQueuedAccounts = accounts;
+  latestQueuedForce = mergeQueuedForceFlag(latestQueuedForce, options?.force);
 
   if (isSyncRunning && activeSyncPromise) {
     return activeSyncPromise;
@@ -701,8 +765,10 @@ export function syncAllNotifications(accounts: AccountSnapshot[]): Promise<void>
     try {
       while (latestQueuedAccounts !== null) {
         const nextAccounts = latestQueuedAccounts;
+        const nextForce = latestQueuedForce;
         latestQueuedAccounts = null;
-        await runSingleSyncPass(nextAccounts);
+        latestQueuedForce = false;
+        await runSingleSyncPass(nextAccounts, { force: nextForce });
       }
     } catch (err) {
       logError('sync queue loop error', err);
@@ -761,6 +827,8 @@ export function getNotificationStatus(): NotificationStatusSnapshot {
     permission: cachedDisplayPermission,
     exact: cachedExactPermission,
     lastSyncAt,
+    lastForcedRegisterAt,
+    desiredCount: lastDesiredCount,
     lastError,
   };
 }
