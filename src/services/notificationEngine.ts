@@ -2,7 +2,6 @@ import { Capacitor } from '@capacitor/core';
 import {
   LocalNotifications,
   type LocalNotificationSchema,
-  type PendingLocalNotificationSchema,
 } from '@capacitor/local-notifications';
 
 export const CHANNEL_ID = 'clash_alerts_v2';
@@ -25,6 +24,18 @@ export interface NotificationPermissionResult {
   exact: PermissionTriState;
 }
 
+export const LAST_REPORT_STORAGE_KEY = 'clash_planner_notif_last_report_v1';
+
+export interface NotificationSyncReport {
+  at: number;
+  scheduled: number;
+  cancelled: number;
+  failed: number;
+  missing: number;
+  cancelledVillages: string[];
+  errors?: string[];
+}
+
 export interface NotificationStatusSnapshot {
   permission: NotificationDisplayStatus;
   exact: PermissionTriState;
@@ -32,6 +43,7 @@ export interface NotificationStatusSnapshot {
   lastForcedRegisterAt: number | null;
   desiredCount: number;
   lastError: string | null;
+  lastReport: NotificationSyncReport | null;
 }
 
 export interface UpgradeSlotSnapshot {
@@ -65,6 +77,8 @@ export interface AccountSnapshot {
 
 export interface DesiredNotificationItem {
   id: number;
+  villageId: string;
+  slotKey: string;
   title: string;
   body: string;
   finishEpochMs: number;
@@ -96,11 +110,16 @@ let lastSyncAt: number | null = null;
 let lastForcedRegisterAt: number | null = null;
 let lastDesiredCount = 0;
 let lastError: string | null = null;
+let lastSyncReport: NotificationSyncReport | null = null;
+let hasLoadedLastReportFromStorage = false;
+const knownVillageNamesById = new Map<string, string>();
 let inFlightPermissionRequest: Promise<NotificationPermissionResult> | null = null;
 
 let isSyncRunning = false;
 let latestQueuedAccounts: AccountSnapshot[] | null = null;
 let latestQueuedForce = false;
+let latestQueuedFullCleanup = false;
+let latestQueuedActiveVillageId: string | null | undefined = undefined;
 let activeSyncPromise: Promise<void> | null = null;
 
 export function isNativeNotificationPlatform(): boolean {
@@ -338,6 +357,8 @@ export function buildDesiredNotifications(
     const sig = `${epochMs}|${title}|${body}`;
     desired.push({
       id,
+      villageId,
+      slotKey,
       title,
       body,
       finishEpochMs: epochMs,
@@ -560,12 +581,17 @@ function toCapacitorSchema(item: DesiredNotificationItem): LocalNotificationSche
     },
     channelId: CHANNEL_ID,
     smallIcon: SMALL_ICON,
-    extra: { sig: item.sig },
+    extra: {
+      sig: item.sig,
+      villageId: item.villageId,
+      slotKey: item.slotKey,
+    },
   };
 }
 
 export interface PendingNotificationLike {
   id: number;
+  title?: string;
   extra?: Record<string, unknown> | null;
 }
 
@@ -576,7 +602,25 @@ export interface SyncPlan {
 
 export interface SyncNotificationOptions {
   force?: boolean;
+  activeVillageId?: string | null;
+  fullCleanup?: boolean;
 }
+
+export interface PlanSyncOptions extends SyncNotificationOptions {
+  knownVillageIds?: Iterable<string> | null;
+}
+
+export interface LocalNotificationsAdapter {
+  getPending(): Promise<{ notifications: PendingNotificationLike[] }>;
+  schedule(options: { notifications: LocalNotificationSchema[] }): Promise<unknown>;
+  cancel(options: { notifications: Array<{ id: number }> }): Promise<unknown>;
+}
+
+const nativeLocalNotificationsAdapter: LocalNotificationsAdapter = {
+  getPending: () => LocalNotifications.getPending(),
+  schedule: (options) => LocalNotifications.schedule(options),
+  cancel: (options) => LocalNotifications.cancel(options),
+};
 
 function getPendingSignature(pending: PendingNotificationLike): string | null {
   const extra = pending.extra as Record<string, unknown> | null | undefined;
@@ -586,18 +630,123 @@ function getPendingSignature(pending: PendingNotificationLike): string | null {
   return null;
 }
 
+function getPendingVillageId(pending: PendingNotificationLike): string | null {
+  const extra = pending.extra as Record<string, unknown> | null | undefined;
+  if (extra && typeof extra.villageId === 'string') {
+    const trimmed = extra.villageId.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return null;
+}
+
+function extractVillageNameFromTitle(title: string | undefined): string | null {
+  if (typeof title !== 'string') return null;
+  const bulletIdx = title.lastIndexOf('•');
+  if (bulletIdx >= 0) {
+    const name = title.slice(bulletIdx + 1).trim();
+    if (name.length > 0) return name;
+  }
+  return null;
+}
+
+function loadLastReportFromStorage(): NotificationSyncReport | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(LAST_REPORT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<NotificationSyncReport> | null;
+    if (
+      !parsed ||
+      typeof parsed.at !== 'number' ||
+      !Number.isFinite(parsed.at) ||
+      typeof parsed.scheduled !== 'number' ||
+      typeof parsed.cancelled !== 'number' ||
+      typeof parsed.failed !== 'number' ||
+      typeof parsed.missing !== 'number'
+    ) {
+      return null;
+    }
+    return {
+      at: parsed.at,
+      scheduled: parsed.scheduled,
+      cancelled: parsed.cancelled,
+      failed: parsed.failed,
+      missing: parsed.missing,
+      cancelledVillages: Array.isArray(parsed.cancelledVillages)
+        ? parsed.cancelledVillages.filter((v): v is string => typeof v === 'string')
+        : [],
+      ...(Array.isArray(parsed.errors)
+        ? { errors: parsed.errors.filter((e): e is string => typeof e === 'string').slice(0, 3) }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveLastReport(report: NotificationSyncReport): void {
+  lastSyncReport = report;
+  hasLoadedLastReportFromStorage = true;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(LAST_REPORT_STORAGE_KEY, JSON.stringify(report));
+    }
+  } catch {
+    // Best-effort only
+  }
+}
+
+export function getLastSyncReport(): NotificationSyncReport | null {
+  if (!hasLoadedLastReportFromStorage) {
+    hasLoadedLastReportFromStorage = true;
+    if (lastSyncReport === null) {
+      lastSyncReport = loadLastReportFromStorage();
+    }
+  }
+  return lastSyncReport;
+}
+
 /**
  * Pure diff planner between desired notifications and Capacitor's saved pending list.
  * - force = false: schedule only missing IDs or changed signatures.
  * - force = true: schedule ALL desired items (re-registering AlarmManager alarms even when sig matches).
- * - In both modes, cancel only orphaned pending IDs (never TEST_ALARM_ID).
+ * - Orphan cancellation:
+ *   - fullCleanup = true: cancel every orphan pending ID except TEST_ALARM_ID.
+ *   - fullCleanup = false (non-full passes): cancel an orphan ONLY if its extra.villageId
+ *     is NOT in knownVillageIds (deleted village) OR equals activeVillageId (open village).
+ *     Orphans of other known villages and legacy orphans (no villageId) are preserved.
  */
 export function planSync(
   desired: DesiredNotificationItem[],
   pending: PendingNotificationLike[],
-  options?: SyncNotificationOptions
+  options?: PlanSyncOptions
 ): SyncPlan {
   const force = options?.force === true;
+  const hasContext =
+    options?.knownVillageIds !== undefined || options?.activeVillageId !== undefined;
+  const fullCleanup =
+    options?.fullCleanup !== undefined ? options.fullCleanup === true : !hasContext;
+
+  const activeVillageId =
+    typeof options?.activeVillageId === 'string' && options.activeVillageId.trim().length > 0
+      ? options.activeVillageId.trim()
+      : null;
+
+  const knownIdsSet = new Set<string>();
+  if (options?.knownVillageIds) {
+    for (const id of options.knownVillageIds) {
+      if (typeof id === 'string' && id.trim().length > 0) {
+        knownIdsSet.add(id.trim());
+      }
+    }
+  } else {
+    for (const item of desired) {
+      if (typeof item?.villageId === 'string' && item.villageId.trim().length > 0) {
+        knownIdsSet.add(item.villageId.trim());
+      }
+    }
+  }
+
   const pendingById = new Map<number, PendingNotificationLike>();
   for (const p of pending) {
     if (typeof p?.id === 'number' && Number.isFinite(p.id)) {
@@ -628,11 +777,27 @@ export function planSync(
   const toCancel: number[] = [];
   for (const p of pending) {
     if (
-      typeof p?.id === 'number' &&
-      Number.isFinite(p.id) &&
-      !desiredIds.has(p.id) &&
-      p.id !== TEST_ALARM_ID
+      typeof p?.id !== 'number' ||
+      !Number.isFinite(p.id) ||
+      desiredIds.has(p.id) ||
+      p.id === TEST_ALARM_ID
     ) {
+      continue;
+    }
+
+    if (fullCleanup) {
+      toCancel.push(p.id);
+      continue;
+    }
+
+    const pendingVillageId = getPendingVillageId(p);
+    if (pendingVillageId === null) {
+      // Legacy pending notification (no villageId) is never cancelled in non-full passes
+      continue;
+    }
+    const isDeletedVillage = !knownIdsSet.has(pendingVillageId);
+    const isActiveVillage = activeVillageId !== null && pendingVillageId === activeVillageId;
+    if (isDeletedVillage || isActiveVillage) {
       toCancel.push(p.id);
     }
   }
@@ -648,23 +813,225 @@ export function mergeQueuedForceFlag(existingForce: boolean, incomingForce?: boo
   return existingForce || incomingForce === true;
 }
 
-async function scheduleBatchWithSingleRetry(
-  notifications: LocalNotificationSchema[]
-): Promise<boolean> {
-  if (notifications.length === 0) return true;
+function formatErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+interface ScheduleWithFallbackResult {
+  scheduledIds: number[];
+  failedIds: number[];
+  errors: string[];
+}
+
+async function scheduleWithFallback(
+  items: DesiredNotificationItem[],
+  adapter: LocalNotificationsAdapter
+): Promise<ScheduleWithFallbackResult> {
+  if (items.length === 0) {
+    return { scheduledIds: [], failedIds: [], errors: [] };
+  }
+
+  const schemas = items.map(toCapacitorSchema);
   try {
-    await LocalNotifications.schedule({ notifications });
-    return true;
+    await adapter.schedule({ notifications: schemas });
+    return {
+      scheduledIds: items.map((i) => i.id),
+      failedIds: [],
+      errors: [],
+    };
   } catch (firstErr) {
     logError('LocalNotifications.schedule failed on first attempt, retrying once', firstErr);
     try {
-      await LocalNotifications.schedule({ notifications });
-      return true;
+      await adapter.schedule({ notifications: schemas });
+      return {
+        scheduledIds: items.map((i) => i.id),
+        failedIds: [],
+        errors: [],
+      };
     } catch (retryErr) {
-      logError('LocalNotifications.schedule failed on retry', retryErr);
-      return false;
+      logError(
+        'LocalNotifications.schedule failed on retry, falling back to one-by-one scheduling',
+        retryErr
+      );
     }
   }
+
+  // One-by-one fallback so a single bad item never blocks the rest of the batch
+  const scheduledIds: number[] = [];
+  const failedIds: number[] = [];
+  const errors: string[] = [];
+
+  for (const item of items) {
+    try {
+      await adapter.schedule({ notifications: [toCapacitorSchema(item)] });
+      scheduledIds.push(item.id);
+    } catch (itemErr) {
+      failedIds.push(item.id);
+      if (errors.length < 3) {
+        errors.push(`id=${item.id}: ${formatErrorMessage(itemErr)}`);
+      }
+      logError(`LocalNotifications.schedule failed for item id=${item.id}`, itemErr);
+    }
+  }
+
+  return { scheduledIds, failedIds, errors };
+}
+
+export interface ExecuteSyncResult {
+  report: NotificationSyncReport;
+  desiredCount: number;
+  scheduledOk: boolean;
+}
+
+/**
+ * Executes a single sync pass using an injectable LocalNotifications adapter
+ * (used by both native runtime and automated tests). Never throws.
+ */
+export async function executeSyncPassWithAdapter(
+  accounts: AccountSnapshot[],
+  adapter: LocalNotificationsAdapter,
+  options?: SyncNotificationOptions & { now?: number }
+): Promise<ExecuteSyncResult | null> {
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    return null;
+  }
+
+  const force = options?.force === true;
+  const fullCleanup = options?.fullCleanup === true;
+  const activeVillageId = options?.activeVillageId ?? null;
+  const now = typeof options?.now === 'number' ? options.now : Date.now();
+
+  const knownVillageIds = new Set<string>();
+  const villageNameById = new Map<string, string>();
+  for (const acc of accounts) {
+    if (acc && typeof acc.id === 'string' && acc.id.trim().length > 0) {
+      const vid = acc.id.trim();
+      knownVillageIds.add(vid);
+      const vname = typeof acc.name === 'string' && acc.name.trim() ? acc.name.trim() : vid;
+      villageNameById.set(vid, vname);
+      knownVillageNamesById.set(vid, vname);
+    }
+  }
+
+  // Inspect currently pending notifications
+  let pending: PendingNotificationLike[] = [];
+  try {
+    const pendingResult = await adapter.getPending();
+    pending = Array.isArray(pendingResult?.notifications) ? pendingResult.notifications : [];
+  } catch (err) {
+    logError('LocalNotifications.getPending failed', err);
+    return null;
+  }
+
+  const pendingById = new Map<number, PendingNotificationLike>();
+  for (const p of pending) {
+    if (typeof p?.id === 'number' && Number.isFinite(p.id)) {
+      pendingById.set(p.id, p);
+    }
+  }
+
+  // Build desired set across ALL accounts
+  const desired = buildDesiredNotifications(accounts, now);
+
+  // Plan schedule & safe orphan cancel sets
+  const { toSchedule, toCancel } = planSync(desired, pending, {
+    force,
+    activeVillageId,
+    knownVillageIds,
+    fullCleanup,
+  });
+
+  // Schedule first (batch -> retry once -> one-by-one fallback)
+  const itemById = new Map<number, DesiredNotificationItem>();
+  for (const item of toSchedule) {
+    itemById.set(item.id, item);
+  }
+
+  const scheduleResult = await scheduleWithFallback(toSchedule, adapter);
+  const failedIdSet = new Set<number>(scheduleResult.failedIds);
+  const errors = [...scheduleResult.errors];
+
+  // Verification: check that every scheduled id is present in getPending(); re-schedule missing ones individually once
+  let missingCount = 0;
+  if (scheduleResult.scheduledIds.length > 0) {
+    try {
+      const verifyResult = await adapter.getPending();
+      const verifyList = Array.isArray(verifyResult?.notifications)
+        ? verifyResult.notifications
+        : [];
+      const presentIds = new Set<number>();
+      for (const p of verifyList) {
+        if (typeof p?.id === 'number' && Number.isFinite(p.id)) {
+          presentIds.add(p.id);
+        }
+      }
+
+      const missingIds = scheduleResult.scheduledIds.filter((id) => !presentIds.has(id));
+      missingCount = missingIds.length;
+
+      for (const missingId of missingIds) {
+        const missingItem = itemById.get(missingId);
+        if (!missingItem) continue;
+        try {
+          await adapter.schedule({ notifications: [toCapacitorSchema(missingItem)] });
+        } catch (verifyErr) {
+          failedIdSet.add(missingId);
+          if (errors.length < 3) {
+            errors.push(`verify id=${missingId}: ${formatErrorMessage(verifyErr)}`);
+          }
+          logError(`Verification re-schedule failed for id=${missingId}`, verifyErr);
+        }
+      }
+    } catch (verifyGetErr) {
+      logError('Verification getPending failed', verifyGetErr);
+    }
+  }
+
+  // Cancel planned orphans (even if a batch had failures, deleted/active orphans are still cleaned up)
+  let cancelledCount = 0;
+  const cancelledVillages: string[] = [];
+  const cancelledVillageSet = new Set<string>();
+
+  if (toCancel.length > 0) {
+    try {
+      await adapter.cancel({
+        notifications: toCancel.map((id) => ({ id })),
+      });
+      cancelledCount = toCancel.length;
+      for (const id of toCancel) {
+        const p = pendingById.get(id);
+        const vid = p ? getPendingVillageId(p) : null;
+        const resolvedName =
+          (vid ? villageNameById.get(vid) || knownVillageNamesById.get(vid) : null) ||
+          extractVillageNameFromTitle(p?.title) ||
+          vid ||
+          'Legacy';
+        if (!cancelledVillageSet.has(resolvedName)) {
+          cancelledVillageSet.add(resolvedName);
+          cancelledVillages.push(resolvedName);
+        }
+      }
+    } catch (cancelErr) {
+      logError('LocalNotifications.cancel orphans failed', cancelErr);
+    }
+  }
+
+  const scheduledCount = Math.max(0, toSchedule.length - failedIdSet.size);
+  const report: NotificationSyncReport = {
+    at: Date.now(),
+    scheduled: scheduledCount,
+    cancelled: cancelledCount,
+    failed: failedIdSet.size,
+    missing: missingCount,
+    cancelledVillages,
+    ...(errors.length > 0 ? { errors: errors.slice(0, 3) } : {}),
+  };
+
+  return {
+    report,
+    desiredCount: desired.length,
+    scheduledOk: failedIdSet.size === 0,
+  };
 }
 
 async function runSingleSyncPass(
@@ -689,48 +1056,24 @@ async function runSingleSyncPass(
       return;
     }
 
-    // (c) Inspect currently pending Android notifications
-    let pending: PendingLocalNotificationSchema[] = [];
-    try {
-      const pendingResult = await LocalNotifications.getPending();
-      pending = Array.isArray(pendingResult?.notifications) ? pendingResult.notifications : [];
-    } catch (err) {
-      logError('LocalNotifications.getPending failed', err);
+    // (c)-(g) Execute diff, isolated schedule + verification, and safe orphan cancel
+    const result = await executeSyncPassWithAdapter(
+      accounts,
+      nativeLocalNotificationsAdapter,
+      options
+    );
+    if (!result) {
       return;
     }
 
-    // (d) Build desired set across ALL accounts
-    const desired = buildDesiredNotifications(accounts, Date.now());
-
-    // (e) Plan schedule & orphan cancel sets
-    const { toSchedule, toCancel } = planSync(desired, pending, { force });
-
-    // (f) SCHEDULE FIRST in one call — never cancel before schedule succeeds
-    if (toSchedule.length > 0) {
-      const scheduledOk = await scheduleBatchWithSingleRetry(toSchedule.map(toCapacitorSchema));
-      if (!scheduledOk) {
-        return;
-      }
-    }
-
-    // (g) THEN cancel only orphaned pending IDs (never touch matching IDs or TEST_ALARM_ID)
-    if (toCancel.length > 0) {
-      try {
-        await LocalNotifications.cancel({
-          notifications: toCancel.map((id) => ({ id })),
-        });
-      } catch (cancelErr) {
-        logError('LocalNotifications.cancel orphans failed', cancelErr);
-      }
-    }
-
-    const nowTs = Date.now();
+    const nowTs = result.report.at;
     lastSyncAt = nowTs;
-    lastDesiredCount = desired.length;
-    if (force) {
+    lastDesiredCount = result.desiredCount;
+    if (force && result.scheduledOk) {
       lastForcedRegisterAt = nowTs;
     }
-    lastError = null;
+    saveLastReport(result.report);
+    lastError = result.report.errors?.[0] ?? null;
   } catch (err) {
     logError('syncAllNotifications pass failed', err);
   }
@@ -740,7 +1083,7 @@ async function runSingleSyncPass(
  * Latest-wins serialized sync:
  * At most one run executes at a time; concurrent calls store the newest snapshot
  * and run exactly once more after the active pass finishes (no unbounded queue).
- * Queued force flags are merged with OR so a forced refresh is never dropped.
+ * Queued force and fullCleanup flags are merged with OR so neither is dropped.
  */
 export function syncAllNotifications(
   accounts: AccountSnapshot[],
@@ -755,6 +1098,10 @@ export function syncAllNotifications(
 
   latestQueuedAccounts = accounts;
   latestQueuedForce = mergeQueuedForceFlag(latestQueuedForce, options?.force);
+  latestQueuedFullCleanup = mergeQueuedForceFlag(latestQueuedFullCleanup, options?.fullCleanup);
+  if (options?.activeVillageId !== undefined) {
+    latestQueuedActiveVillageId = options.activeVillageId;
+  }
 
   if (isSyncRunning && activeSyncPromise) {
     return activeSyncPromise;
@@ -766,9 +1113,17 @@ export function syncAllNotifications(
       while (latestQueuedAccounts !== null) {
         const nextAccounts = latestQueuedAccounts;
         const nextForce = latestQueuedForce;
+        const nextFullCleanup = latestQueuedFullCleanup;
+        const nextActiveVillageId = latestQueuedActiveVillageId;
         latestQueuedAccounts = null;
         latestQueuedForce = false;
-        await runSingleSyncPass(nextAccounts, { force: nextForce });
+        latestQueuedFullCleanup = false;
+        latestQueuedActiveVillageId = undefined;
+        await runSingleSyncPass(nextAccounts, {
+          force: nextForce,
+          fullCleanup: nextFullCleanup,
+          activeVillageId: nextActiveVillageId,
+        });
       }
     } catch (err) {
       logError('sync queue loop error', err);
@@ -807,14 +1162,16 @@ export async function scheduleTestAlarm(): Promise<Date | null> {
     const body = 'Clash Planner test notification arrived!';
     const testItem: DesiredNotificationItem = {
       id: TEST_ALARM_ID,
+      villageId: '__test__',
+      slotKey: 'test_alarm',
       title,
       body,
       finishEpochMs: triggerEpochMs,
       sig: `${triggerEpochMs}|${title}|${body}`,
     };
 
-    const ok = await scheduleBatchWithSingleRetry([toCapacitorSchema(testItem)]);
-    if (!ok) return null;
+    const result = await scheduleWithFallback([testItem], nativeLocalNotificationsAdapter);
+    if (result.failedIds.length > 0) return null;
     return new Date(triggerEpochMs);
   } catch (err) {
     logError('scheduleTestAlarm failed', err);
@@ -830,5 +1187,6 @@ export function getNotificationStatus(): NotificationStatusSnapshot {
     lastForcedRegisterAt,
     desiredCount: lastDesiredCount,
     lastError,
+    lastReport: getLastSyncReport(),
   };
 }

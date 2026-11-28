@@ -5118,56 +5118,60 @@ export default function App() {
   // (Skip persisting while unconfirmed timer edits are in progress so cancel/navigation reverts cleanly)
   useEffect(() => {
     if (isEditingTimers) return;
+    const currentStateToSave: SavedState = {
+      mode: currentMode,
+      numBuilders,
+      builders,
+      potions: potionsInput,
+      lockedResults,
+      lockedSavedText: savedText,
+      researchPotions,
+      labTimer,
+      goblinLabTimer,
+      targetLabTimestamp,
+      labFormattedDate,
+      labSavedText,
+      targetGoblinLabTimestamp,
+      goblinLabFormattedDate,
+      petPotions,
+      petTimer,
+      targetPetTimestamp,
+      petFormattedDate,
+      petSavedText,
+      builderBoostEndTime,
+      labBoostEndTime,
+      petBoostEndTime,
+      builderBiteEndTime,
+      studySoupEndTime,
+      builderApprentice,
+      labApprentice,
+      thLevel,
+      lastSynced,
+    };
+
+    // Keep legacy STORAGE_KEY synced with the active village profile
     try {
-      const currentStateToSave: SavedState = {
-        mode: currentMode,
-        numBuilders,
-        builders,
-        potions: potionsInput,
-        lockedResults,
-        lockedSavedText: savedText,
-        researchPotions,
-        labTimer,
-        goblinLabTimer,
-        targetLabTimestamp,
-        labFormattedDate,
-        labSavedText,
-        targetGoblinLabTimestamp,
-        goblinLabFormattedDate,
-        petPotions,
-        petTimer,
-        targetPetTimestamp,
-        petFormattedDate,
-        petSavedText,
-        builderBoostEndTime,
-        labBoostEndTime,
-        petBoostEndTime,
-        builderBiteEndTime,
-        studySoupEndTime,
-        builderApprentice,
-        labApprentice,
-        thLevel,
-        lastSynced,
-      };
-
-      // Keep legacy STORAGE_KEY synced with the active village profile
       localStorage.setItem(STORAGE_KEY, JSON.stringify(currentStateToSave));
-
-      setAccounts((prevAccounts) => {
-        const updatedAccounts = prevAccounts.map((acc) =>
-          acc.id === activeAccountId ? { ...acc, data: currentStateToSave } : acc
-        );
-        const multiPayload: MultiAccountStorage = {
-          activeAccountId,
-          accounts: updatedAccounts,
-        };
-        localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(multiPayload));
-        syncAllVillagesToNativeWidget(updatedAccounts, activeAccountId);
-        return updatedAccounts;
-      });
     } catch {
       // Ignore storage quota errors
     }
+
+    setAccounts((prevAccounts) => {
+      const updatedAccounts = prevAccounts.map((acc) =>
+        acc.id === activeAccountId ? { ...acc, data: currentStateToSave } : acc
+      );
+      const multiPayload: MultiAccountStorage = {
+        activeAccountId,
+        accounts: updatedAccounts,
+      };
+      try {
+        localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(multiPayload));
+      } catch {
+        // Ignore storage quota errors
+      }
+      syncAllVillagesToNativeWidget(updatedAccounts, activeAccountId);
+      return updatedAccounts;
+    });
   }, [
     isEditingTimers,
     activeAccountId,
@@ -5203,7 +5207,9 @@ export default function App() {
 
   // Keep latest notification snapshots mapped from single source of truth (accounts + active live state)
   const latestNotificationSnapshotsRef = useRef<AccountSnapshot[]>([]);
+  const latestActiveAccountIdRef = useRef<string>(activeAccountId);
   const hasRunInitialNotificationSyncRef = useRef<boolean>(false);
+  latestActiveAccountIdRef.current = activeAccountId;
 
   const liveActiveNotificationData: SavedState = {
     mode: currentMode,
@@ -5241,12 +5247,16 @@ export default function App() {
     liveActiveNotificationData
   );
 
-  // Sync once on launch after initial accounts have loaded (forced re-register)
+  // Sync once on launch after initial accounts have loaded (forced re-register + full cleanup)
   useEffect(() => {
     if (!isNativeNotificationPlatform()) return;
     const snapshots = latestNotificationSnapshotsRef.current;
     if (snapshots.length === 0) return;
-    void syncAllNotifications(snapshots, { force: true }).then(() => {
+    void syncAllNotifications(snapshots, {
+      force: true,
+      fullCleanup: true,
+      activeVillageId: latestActiveAccountIdRef.current,
+    }).then(() => {
       setNotificationStatus(getNotificationStatus());
     });
   }, []);
@@ -5262,7 +5272,10 @@ export default function App() {
     if (snapshots.length === 0) return;
 
     const timerId = window.setTimeout(() => {
-      void syncAllNotifications(latestNotificationSnapshotsRef.current).then(() => {
+      void syncAllNotifications(latestNotificationSnapshotsRef.current, {
+        activeVillageId: latestActiveAccountIdRef.current,
+        fullCleanup: false,
+      }).then(() => {
         setNotificationStatus(getNotificationStatus());
       });
     }, 500);
@@ -5302,7 +5315,13 @@ export default function App() {
       const snapshots = latestNotificationSnapshotsRef.current;
       if (snapshots.length === 0) return;
       void ensureChannel()
-        .then(() => syncAllNotifications(snapshots, { force: true }))
+        .then(() =>
+          syncAllNotifications(snapshots, {
+            force: true,
+            fullCleanup: false,
+            activeVillageId: latestActiveAccountIdRef.current,
+          })
+        )
         .then(() => {
           setNotificationStatus(getNotificationStatus());
         });
@@ -6998,8 +7017,15 @@ export default function App() {
         activeProfile.data
       );
       latestNotificationSnapshotsRef.current = restoredSnapshots;
+      latestActiveAccountIdRef.current = activeProfile.id;
       void ensureChannel()
-        .then(() => syncAllNotifications(restoredSnapshots, { force: true }))
+        .then(() =>
+          syncAllNotifications(restoredSnapshots, {
+            force: true,
+            fullCleanup: true,
+            activeVillageId: activeProfile.id,
+          })
+        )
         .then(() => {
           setNotificationStatus(getNotificationStatus());
         });
@@ -10590,6 +10616,21 @@ export default function App() {
                       return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
                     })()}{' '}
                     ({notificationStatus.desiredCount} set)
+                  </div>
+                )}
+                {notificationStatus.lastReport !== null && (
+                  <div className="text-[11px] text-gray-400">
+                    {(() => {
+                      const r = notificationStatus.lastReport;
+                      const d = new Date(r.at);
+                      const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                      const missingPart = r.missing > 0 ? `, missing ${r.missing}` : '';
+                      const cancelledVillagesPart =
+                        r.cancelled > 0 && r.cancelledVillages.length > 0
+                          ? ` (${r.cancelledVillages.join(', ')})`
+                          : '';
+                      return `Last sync ${hhmm}: set ${r.scheduled}, cancelled ${r.cancelled}, failed ${r.failed}${missingPart}${cancelledVillagesPart}`;
+                    })()}
                   </div>
                 )}
                 {(testAlarmConfirmText ||
